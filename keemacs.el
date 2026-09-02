@@ -1,20 +1,28 @@
-;;; keepass-browse.el --- Browse and edit KeePass entries (consult + embark) -*- lexical-binding: t; -*-
+;;; keemacs.el --- Browse and edit KeePass entries (consult + embark) -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Chris Bitmead
 
 ;; Author: Chris Bitmead <xpusostomos@gmail.com>
 ;; Maintainer: Chris Bitmead <xpusostomos@gmail.com>
 ;; Assisted-by: Claude
-; Version: 0.1.0
+;; Version: 0.1.0
 ;; Package-Requires: ((emacs "27.1") (consult "0.1") (embark "0.1") (embark-consult "0.1"))
 ;; Keywords: comm, tools, passwords, keepassxc
-;; URL: https://github.com/xpusostomos/keepass-auth-source
+;; URL: https://github.com/xpusostomos/keemacs
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
 ;; the Free Software Foundation, either version 3 of the License, or
 ;; (at your option) any later version.
+
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
@@ -23,7 +31,7 @@
 ;; (`embark-consult' provides preview and `embark-act' provides the action
 ;; menu for the entry under point).
 ;;
-;; This is deliberately separate from `keepass-auth-source', which feeds
+;; This is deliberately separate from `keemacs-auth', which feeds
 ;; credentials to `auth-source'.  This package is for *using and editing* a
 ;; database interactively: list entries with the fields you care about,
 ;; select one, copy/insert its username, password, URL, notes or TOTP, and
@@ -35,19 +43,19 @@
 ;; yet create them).
 ;;
 ;; Two entry points:
-;;   - `keepass-browse'            pick an entry through the minibuffer
+;;   - `keemacs'            pick an entry through the minibuffer
 ;;     (consult/vertico), then act on it (RET and `C-.' both lead to the
 ;;     action menu)
-;;   - `keepass-browse-buffer'     a columned listing buffer (Embark works
+;;   - `keemacs-buffer'     a columned listing buffer (Embark works
 ;;     on the entry at point)
 ;;
 ;; The same actions are available from the Embark action maps
-;; (`keepass-browse-action-map' and `keepass-browse-select-action-map') and
+;; (`keemacs-action-map' and `keemacs-select-action-map') and
 ;; as interactive commands.
 ;;
-;; This package builds on `keepass-auth-source' (same package): the shared
+;; This package builds on `keemacs-auth' (same package): the shared
 ;; keepassxc-cli execution, master-password prompting/caching, error
-;; reporting and the `keepass-auth-source-verbose' flag live there.
+;; reporting and the `keemacs-auth-verbose' flag live there.
 
 ;;; Code:
 
@@ -56,80 +64,80 @@
 (require 'embark)
 (require 'embark-consult)
 (require 'image)
-(require 'keepass-auth-source)
+(require 'keemacs-auth)
 (require 'password-cache)
 (require 'subr-x)
 
-(defgroup keepass-browse nil
+(defgroup keemacs nil
   "Browse and edit KeePass entries with consult and embark."
   :group 'tools
-  :prefix "keepass-browse-")
+  :prefix "keemacs-")
 
-(defcustom keepass-browse-databases nil
+(defcustom keemacs-databases nil
   "List of KeePass databases available for browsing.
-Each element is a database spec plist as in `keepass-make-db-spec', with
+Each element is a database spec plist as in `keemacs-auth-make-db-spec', with
 an optional `:name' label (defaulting to the file name when omitted).
 For example:
 
-  (setq keepass-browse-databases
+  (setq keemacs-databases
         \\='((:name \"personal\" :file \"~/passwords.kdbx\")
             (:file \"~/work.kdbx\" :keyfile \"~/work.keyx\")))"
   :type '(repeat keepass-db-spec)
-  :group 'keepass-browse)
+  :group 'keemacs)
 
-(defcustom keepass-browse-database nil
-  "The currently active KeePass database spec (a `keepass-make-db-spec'
-plist).  Set interactively with `keepass-browse-select-database'."
+(defcustom keemacs-database nil
+  "The currently active KeePass database spec (a `keemacs-auth-make-db-spec'
+plist).  Set interactively with `keemacs-select-database'."
   :type '(choice (const :tag "None" nil)
                  keepass-db-spec)
-  :group 'keepass-browse)
+  :group 'keemacs)
 
 ;; If the database *list* is re-set, any previously selected database may
 ;; point at something stale (a fixed/removed entry), and
-;; `keepass-browse--ensure-database' would keep using it because it only
-;; acts when `keepass-browse-database' is nil.  Reset it so the user is
+;; `keemacs--ensure-database' would keep using it because it only
+;; acts when `keemacs-database' is nil.  Reset it so the user is
 ;; prompted to re-select.
-(add-variable-watcher 'keepass-browse-databases
+(add-variable-watcher 'keemacs-databases
                       (lambda (_sym _newval _op _where)
-                        (setq keepass-browse-database nil)))
+                        (setq keemacs-database nil)))
 
-(defcustom keepass-browse-cache-expiry 7200
+(defcustom keemacs-auth-cache-expiry 7200
   "How many seconds to cache the database master password.  Nil disables."
   :type '(choice (const :tag "Never" nil)
                  (const :tag "All Day" 86400)
                  (const :tag "2 Hours" 7200)
                  (const :tag "30 Minutes" 1800)
                  (integer :tag "Seconds"))
-  :group 'keepass-browse)
+  :group 'keemacs)
 
-(defcustom keepass-browse-fields '("Title" "UserName" "URL")
+(defcustom keemacs-fields '("Title" "UserName" "URL")
   "Fields shown in each candidate line, in order.
 Each must be a standard KeePass field name: \"Title\", \"UserName\",
 \"Password\", \"URL\" or \"Notes\"."
   :type '(repeat (choice (const "Title") (const "UserName")
                          (const "Password") (const "URL") (const "Notes")))
-  :group 'keepass-browse)
+  :group 'keemacs)
 
-(defcustom keepass-browse-field-width 24
+(defcustom keemacs-field-width 24
   "Width each field is truncated or padded to in candidate lines.
 Raise this to see more of long values -- titles containing \"/\"
 (particularly) are easier to tell apart when not clipped hard."
   :type 'integer
-  :group 'keepass-browse)
+  :group 'keemacs)
 
-(defcustom keepass-browse-clear-clipboard-seconds 0
+(defcustom keemacs-clear-clipboard-seconds 0
   "If non-zero, clear the clipboard this many seconds after a copy."
   :type 'integer
-  :group 'keepass-browse)
+  :group 'keemacs)
 
-(defcustom keepass-browse-generate-length 16
-  "Default length for passwords generated with `keepass-browse--entry-regenerate'.
+(defcustom keemacs-generate-length 16
+  "Default length for passwords generated with `keemacs--entry-regenerate'.
 The prompted default each time; the last-entered length is remembered for
 the session."
   :type 'integer
-  :group 'keepass-browse)
+  :group 'keemacs)
 
-(defcustom keepass-browse-generate-options
+(defcustom keemacs-generate-options
   '(("all printable (!-~)"
      ("generate" "--custom"
       "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
@@ -151,65 +159,65 @@ until a choice is remembered.  Add, remove or reorder your own sets here."
   :type '(repeat (cons (string :tag "Label")
                        (repeat (choice (string :tag "Arg")
                                        (const :tag ":length" :length)))))
-  :group 'keepass-browse)
+  :group 'keemacs)
 
-(defcustom keepass-browse-default-action #'keepass-browse-view
-  "Function run on the selected entry when `keepass-browse' returns.
-Called with the entry path.  The default, `keepass-browse-view', shows the
-entry; it can be changed to e.g. `keepass-browse-copy-password' to copy the
+(defcustom keemacs-default-action #'keemacs-view
+  "Function run on the selected entry when `keemacs' returns.
+Called with the entry path.  The default, `keemacs-view', shows the
+entry; it can be changed to e.g. `keemacs-copy-password' to copy the
 password directly on RET."
-  :type '(choice (function :tag "View entry" keepass-browse-view)
-                 (function :tag "Copy password" keepass-browse-copy-password)
+  :type '(choice (function :tag "View entry" keemacs-view)
+                 (function :tag "Copy password" keemacs-copy-password)
                  (function :tag "None (just return the path)" ignore))
-  :group 'keepass-browse)
+  :group 'keemacs)
 
 ;; The single source of truth for the entry actions.  Both the Embark action
 ;; keymaps and the visible key-menu on the view screen are generated from
 ;; this list, so the two menus can never drift apart.  Each element is
 ;; (KEY LABEL FUNCTION), where FUNCTION takes an entry path.
-(defconst keepass-browse--actions
-  '(("t" "copy title"    keepass-browse-copy-title)
-    ("u" "copy username" keepass-browse-copy-username)
-    ("p" "copy password" keepass-browse-copy-password)
-    ("l" "copy url"      keepass-browse-copy-url)
-    ("n" "copy notes"    keepass-browse-copy-notes)
-    ("o" "copy totp"     keepass-browse-copy-totp)
-    ("v" "view"          keepass-browse-view)
-    ("e" "edit"          keepass-browse-edit)
-    ("c" "clone"         keepass-browse-clone)
-    ("a" "add"           keepass-browse-add)
-    ("d" "delete"        keepass-browse-delete))
-  "Actions for a keepass-browse entry, in canonical field order.
-See `keepass-browse--action-map'.  (TOTP is the entry's time-based one-time
-password, i.e. a stored two-factor code; see `keepass-browse-copy-totp'.)")
+(defconst keemacs--actions
+  '(("t" "copy title"    keemacs-copy-title)
+    ("u" "copy username" keemacs-copy-username)
+    ("p" "copy password" keemacs-copy-password)
+    ("l" "copy url"      keemacs-copy-url)
+    ("n" "copy notes"    keemacs-copy-notes)
+    ("o" "copy totp"     keemacs-copy-totp)
+    ("v" "view"          keemacs-view)
+    ("e" "edit"          keemacs-edit)
+    ("c" "clone"         keemacs-clone)
+    ("a" "add"           keemacs-add)
+    ("d" "delete"        keemacs-delete))
+  "Actions for a keemacs entry, in canonical field order.
+See `keemacs--action-map'.  (TOTP is the entry's time-based one-time
+password, i.e. a stored two-factor code; see `keemacs-copy-totp'.)")
 
 ;;; Internal state
 
-(defvar keepass-browse--last-killed nil
+(defvar keemacs--last-killed nil
   "The last string copied, so clearing only happens if it is unchanged.")
 
-(defvar keepass-browse--clear-timer nil
+(defvar keemacs--clear-timer nil
   "Timer to clear the clipboard.")
 
-(defvar keepass-browse-history nil
-  "History for `keepass-browse-select'.")
+(defvar keemacs-history nil
+  "History for `keemacs-select'.")
 
-(defvar keepass-browse--last-generated-length nil
-  "Length last used by `keepass-browse--entry-regenerate'.
+(defvar keemacs--last-generated-length nil
+  "Length last used by `keemacs--entry-regenerate'.
 Nil until the first generation; thereafter the default offered.")
 
-(defvar keepass-browse--last-generated-charset nil
-  "Label of the character set last used by `keepass-browse--entry-regenerate'.
-A label from `keepass-browse-generate-options'.  Nil until the first
+(defvar keemacs--last-generated-charset nil
+  "Label of the character set last used by `keemacs--entry-regenerate'.
+A label from `keemacs-generate-options'.  Nil until the first
 generation; thereafter the default offered.")
 
-(defvar keepass-browse--custom-icons nil
+(defvar keemacs--custom-icons nil
   "((UUID . BYTES)) decoded custom icon images from the last export.")
 
-(defvar keepass-browse--entry-custom-icons nil
+(defvar keemacs--entry-custom-icons nil
   "((PATH . UUID)) custom icon per entry path from the last export.")
 
-(defvar keepass-browse--entry-parents nil
+(defvar keemacs--entry-parents nil
   "((ENTRY-PATH . GROUP-PATH)) real parent group per entry.
 Recorded from the export tree while collecting; the group and the title
 arrive separately and are kept separately.  Titles may contain
@@ -217,14 +225,14 @@ arrive separately and are kept separately.  Titles may contain
 title -- this map is the only reliable record of where an entry lives,
 for call sites that only have the path.")
 
-(defvar keepass-browse--group-icons nil
+(defvar keemacs--group-icons nil
   "((PATH . (ICON-ID . CUSTOM-UUID))) per group from the last export.
 ICON-ID is the standard icon id as a string (48 is the keepassxc default
 for groups); CUSTOM-UUID is the group's custom icon image, or nil.
-Unlike the entry-derived paths in `keepass-browse--group-contents', this
+Unlike the entry-derived paths in `keemacs--group-contents', this
 includes empty groups.  The Recycle Bin subtree is not recorded.")
 
-(defvar keepass-browse--icon-image-cache nil
+(defvar keemacs--icon-image-cache nil
   "Created custom icon images, keyed by (UUID . MAX-PIXELS).")
 
 ;; vertico is an optional completion framework (consult works without it);
@@ -237,140 +245,130 @@ includes empty groups.  The Recycle Bin subtree is not recorded.")
 ;;; Subprocess plumbing
 ;;
 ;; All keepassxc-cli execution and master-password prompting is shared with
-;; `keepass-auth-source' (which this package requires); the wrappers below
+;; `keemacs-auth' (which this package requires); the wrappers below
 ;; adapt it to the database configured for browsing.  See
-;; `keepass-auth-source--keepassxc-run' et al.
+;; `keemacs-auth--keepassxc-run' et al.
 
-(defun keepass-browse--db-spec ()
+(defun keemacs--db-spec ()
   "Return the active database spec, signalling an error if none is set."
-  (unless keepass-browse-database
-    (user-error "No KeePass database selected; run `keepass-browse-select-database' first"))
-  keepass-browse-database)
+  (unless keemacs-database
+    (user-error "No KeePass database selected; run `keemacs-select-database' first"))
+  keemacs-database)
 
-(defun keepass-browse--database-path ()
+(defun keemacs--database-path ()
   "Return the active database's expanded file path.
 The `:file' of the active database's spec, expanded so a leading \"~\"
 works; `file-exists-p' accepts \"~\" but keepassxc-cli does not."
-  (let ((spec (keepass-browse--db-spec)))
+  (let ((spec (keemacs--db-spec)))
     (expand-file-name
-     (keepass-db-spec-file (keepass-db-spec-normalize spec)))))
+     (keemacs-auth-db-spec-file (keemacs-auth-db-spec-normalize spec)))))
 
-(defun keepass-browse--db-keyfile ()
+(defun keemacs--db-keyfile ()
   "Return the active database's key file argument list, or nil.
 A list (\"--key-file\" FILE), ready to splice into a keepassxc-cli
 invocation."
-  (let ((spec (keepass-browse--db-spec)))
-    (keepass-auth-source--keyfile-args
-     (keepass-db-spec-keyfile (keepass-db-spec-normalize spec)))))
+  (let ((spec (keemacs--db-spec)))
+    (keemacs-auth--keyfile-args
+     (keemacs-auth-db-spec-keyfile (keemacs-auth-db-spec-normalize spec)))))
 
-(defun keepass-browse--db-yubi ()
+(defun keemacs--db-yubi ()
   "Return the active database's YubiKey argument list, or nil.
 A list (\"--yubikey\" VALUE), ready to splice into a keepassxc-cli
 invocation."
-  (let ((spec (keepass-browse--db-spec)))
-    (keepass-auth-source--yubi-args
-     (keepass-db-spec-yubi (keepass-db-spec-normalize spec)))))
+  (let ((spec (keemacs--db-spec)))
+    (keemacs-auth--yubi-args
+     (keemacs-auth-db-spec-yubi (keemacs-auth-db-spec-normalize spec)))))
 
-(defun keepass-browse--db-password ()
+(defun keemacs--db-password ()
   "Return the active database's master password, per its spec.
 A string or function in the spec is used as-is; `:prompt' (or an
 unspecified password) asks the user via `password-cache' (keyed by the
-database path), honoring `keepass-browse-cache-expiry'; nil means no
+database path), honoring `keemacs-auth-cache-expiry'; nil means no
 password and resolves to `:no-password'."
-  (let ((db (keepass-browse--database-path))
-        (password-spec (keepass-db-spec-password
-                        (keepass-db-spec-normalize keepass-browse-database))))
-    (keepass-auth-source--resolve-password
-     password-spec db keepass-browse-cache-expiry)))
+  (let ((db (keemacs--database-path))
+        (password-spec (keemacs-auth-db-spec-password
+                        (keemacs-auth-db-spec-normalize keemacs-database))))
+    (keemacs-auth--resolve-password
+     password-spec db keemacs-auth-cache-expiry)))
 
-(defun keepass-browse--read-password ()
-  "Return the browsing database's master password, prompting and caching it.
-Deprecated alias kept for call-site clarity; use `keepass-browse--db-password'."
-  (keepass-browse--db-password))
-
-(defun keepass-browse--run (password &rest args)
+(defun keemacs--run (password &rest args)
   "Run keepassxc-cli with ARGS on the active database.
 PASSWORD is the resolved master password, or `:no-password' for a
 passwordless database (which gets keepassxc-cli's --no-password global
 option and no stdin).  Looks up the key file and YubiKey from the active
 spec."
-  (apply #'keepass-auth-source--keepassxc-run
+  (apply #'keemacs-auth--keepassxc-run
          password
-         (append (keepass-auth-source--no-password-flag password)
-                 (keepass-browse--db-keyfile)
-                 (keepass-browse--db-yubi)
+         (append (keemacs-auth--no-password-flag password)
+                 (keemacs--db-keyfile)
+                 (keemacs--db-yubi)
                  args)))
 
-(defun keepass-browse--run-stdin (password stdin &rest args)
+(defun keemacs--run-stdin (password stdin &rest args)
   "Run keepassxc-cli with ARGS and STDIN, e.g. an entry edit or add.
 STDIN already contains the database password (or nothing for a
 passwordless DB) plus the entry's password, as required by
-`keepass-auth-source--keepassxc-run-stdin'.  PASSWORD is the database's
+`keemacs-auth--keepassxc-run-stdin'.  PASSWORD is the database's
 resolved master password (possibly `:no-password')."
-  (apply #'keepass-auth-source--keepassxc-run-stdin
+  (apply #'keemacs-auth--keepassxc-run-stdin
          stdin
          password
-         (keepass-auth-source--no-password-flag password)
-         (keepass-browse--db-keyfile)
-         (keepass-browse--db-yubi)
+         (keemacs-auth--no-password-flag password)
+         (keemacs--db-keyfile)
+         (keemacs--db-yubi)
          args))
 
-(defun keepass-browse--error (output &optional exit-code)
-  "Signal an error describing a failed keepassxc-cli run (OUTPUT).
-EXIT-CODE is the run's exit status; see `keepass-auth-source--error'."
-  (keepass-auth-source--error output (keepass-browse--database-path) exit-code))
-
-(defun keepass-browse--require-db ()
+(defun keemacs--require-db ()
   "Signal an error unless a database is configured.
 Also applies the default-to-sole-database rule."
-  (keepass-browse--ensure-database))
+  (keemacs--ensure-database))
 
 ;;; Listing and parsing
 
-(defun keepass-browse--valid-field-p (field)
+(defun keemacs--valid-field-p (field)
   "Return non-nil if FIELD names a standard KeePass entry field."
   (member field '("Title" "UserName" "Password" "URL" "Notes")))
 
-(defun keepass-browse--parse-show (output)
+(defun keemacs--parse-show (output)
   "Parse `keepassxc-cli show' OUTPUT into an alist of FIELD . VALUE."
   (let ((result '()))
     (dolist (line (split-string output "\n"))
       (when (string-match "^\\([^:]+\\):[[:space:]]*\\(.*\\)$" line)
         (let ((key (string-trim (match-string 1 line))))
-          (when (keepass-browse--valid-field-p key)
+          (when (keemacs--valid-field-p key)
             (setq result (cons (cons key (string-trim (match-string 2 line)))
                                result))))))
     result))
 
-(defun keepass-browse--entry-get (path)
+(defun keemacs--entry-get (path)
   "Return the FIELD . VALUE alist for the entry at PATH.
 PATH is normally the clean entry path.  If it is a padded display string
 (which an Embark action may hand over), it is resolved through
-`keepass-browse--path-of' first.  Fetches directly from keepassxc-cli with
+`keemacs--path-of' first.  Fetches directly from keepassxc-cli with
 no caching, so database changes made elsewhere (e.g. Google Drive sync) are
 always seen."
-  (setq path (or (keepass-browse--path-of path) path))
-  (let* ((db (keepass-browse--database-path))
-         (pw (keepass-browse--db-password))
-         (run (apply #'keepass-browse--run pw
+  (setq path (or (keemacs--path-of path) path))
+  (let* ((db (keemacs--database-path))
+         (pw (keemacs--db-password))
+         (run (apply #'keemacs--run pw
                      (list "show" "--quiet" "--show-protected" db path))))
     (if (eq (cdr run) 0)
-        (keepass-browse--parse-show (car run))
-      (keepass-browse--error (car run) (cdr run)))))
+        (keemacs--parse-show (car run))
+      (keemacs-auth--error (car run) (keemacs--database-path) (cdr run)))))
 
-(defun keepass-browse--field (entry field)
+(defun keemacs--field (entry field)
   "Return the value of FIELD in parsed alist ENTRY, or \"\"."
   (or (cdr (assoc field entry)) ""))
 
-(defun keepass-browse--entry-paths ()
+(defun keemacs--entry-paths ()
   "Return the list of entry paths (excluding group rows) in the database.
 Reads freshly from keepassxc-cli, with no caching."
-  (let* ((db (keepass-browse--database-path))
-         (run (apply #'keepass-browse--run
-                     (keepass-browse--db-password)
+  (let* ((db (keemacs--database-path))
+         (run (apply #'keemacs--run
+                     (keemacs--db-password)
                      (list "ls" "--quiet" "--recursive" "--flatten" db))))
     (unless (eq (cdr run) 0)
-      (keepass-browse--error (car run) (cdr run)))
+      (keemacs-auth--error (car run) (keemacs--database-path) (cdr run)))
     (let ((paths (seq-filter (lambda (s)
                                (and (not (string-blank-p s))
                                     (not (string-suffix-p "/" s))))
@@ -378,60 +376,60 @@ Reads freshly from keepassxc-cli, with no caching."
       (mapcar (lambda (p) (if (string-prefix-p "/" p) p (concat "/" p)))
               paths))))
 
-(defun keepass-browse--group-paths ()
+(defun keemacs--group-paths ()
   "Return the list of group paths (each ending in /) in the database.
 Reads freshly from keepassxc-cli, with no caching."
-  (let* ((db (keepass-browse--database-path))
-         (run (apply #'keepass-browse--run
-                     (keepass-browse--db-password)
+  (let* ((db (keemacs--database-path))
+         (run (apply #'keemacs--run
+                     (keemacs--db-password)
                      (list "ls" "--quiet" "--recursive" "--flatten" db))))
     (unless (eq (cdr run) 0)
-      (keepass-browse--error (car run) (cdr run)))
+      (keemacs-auth--error (car run) (keemacs--database-path) (cdr run)))
     (mapcar (lambda (g) (if (string-prefix-p "/" g) g (concat "/" g)))
             (seq-filter (lambda (s) (string-suffix-p "/" s))
                         (split-string (car run) "\n" t)))))
 
-(defun keepass-browse--export ()
+(defun keemacs--export ()
   "Return the export XML node tree for the database.
 Does ONE `keepassxc-cli export' call so the whole database (all entries,
 all fields, passwords included) is fetched up front, freshly each time."
-  (let ((run (apply #'keepass-browse--run
-                    (keepass-browse--db-password)
-                    (list "export" "--quiet" (keepass-browse--database-path)))))
+  (let ((run (apply #'keemacs--run
+                    (keemacs--db-password)
+                    (list "export" "--quiet" (keemacs--database-path)))))
     (unless (eq (cdr run) 0)
-      (keepass-browse--error (car run) (cdr run)))
+      (keemacs-auth--error (car run) (keemacs--database-path) (cdr run)))
     (with-temp-buffer
       (insert (car run))
       (goto-char (point-min))
       (libxml-parse-xml-region (point-min) (point-max)))))
 
-(defun keepass-browse--xml-children-tag (node tag)
+(defun keemacs--xml-children-tag (node tag)
   "Return the XML child nodes of NODE whose tag is TAG."
   (seq-filter (lambda (c) (and (consp c) (eq (car c) tag)))
               (cdr node)))
 
-(defun keepass-browse--xml-tag-text (node tag)
+(defun keemacs--xml-tag-text (node tag)
   "Return the text of the first child of NODE with tag TAG, or nil.
 libxml nodes are (TAG ATTRIBUTES &rest CHILDREN); the text is the first
 string among the children, after the attributes slot."
-  (let ((n (car (keepass-browse--xml-children-tag node tag))))
+  (let ((n (car (keemacs--xml-children-tag node tag))))
     (when n
       (catch 'found
         (dolist (el (cdr n))
           (when (stringp el) (throw 'found el)))
         ""))))
 
-(defun keepass-browse--entry-fields (entry-node)
+(defun keemacs--entry-fields (entry-node)
   "Return the FIELD . VALUE alist for export XML ENTRY-NODE."
   (let (fields)
-    (dolist (str (keepass-browse--xml-children-tag entry-node 'String))
-      (let ((key (keepass-browse--xml-tag-text str 'Key)))
-        (when (keepass-browse--valid-field-p key)
-          (setq fields (cons (cons key (keepass-browse--xml-tag-text str 'Value))
+    (dolist (str (keemacs--xml-children-tag entry-node 'String))
+      (let ((key (keemacs--xml-tag-text str 'Key)))
+        (when (keemacs--valid-field-p key)
+          (setq fields (cons (cons key (keemacs--xml-tag-text str 'Value))
                              fields)))))
     (nreverse fields)))
 
-(defun keepass-browse--collect (node group-path)
+(defun keemacs--collect (node group-path)
   "Return ((PATH . FIELDS) ...) for export XML NODE under GROUP-PATH.
 The root group's own name is not part of entries' paths, but nested
 groups' names are.  Each entry's FIELDS also carry its \"Group\" (the
@@ -441,85 +439,85 @@ way -- a title containing \"/\" makes the PATH string ambiguous, so
 nothing downstream may re-derive group or title by splitting it."
   (let ((acc '()))
     ;; Add each entry in this node.
-    (dolist (entry (keepass-browse--xml-children-tag node 'Entry))
-      (let* ((fields (keepass-browse--entry-fields entry))
+    (dolist (entry (keemacs--xml-children-tag node 'Entry))
+      (let* ((fields (keemacs--entry-fields entry))
              ;; The entry's standard icon id, for the picker glyph.
-             (icon-id (keepass-browse--xml-tag-text entry 'IconID))
+             (icon-id (keemacs--xml-tag-text entry 'IconID))
              (fields (if (and icon-id (not (string-empty-p icon-id)))
                          (cons (cons "IconID" icon-id) fields)
                        fields))
              (fields (cons (cons "Group" (concat group-path "/"))
                            fields))
              ;; The entry's custom icon, when it has one.
-             (custom-id (keepass-browse--xml-tag-text entry 'CustomIconUUID))
+             (custom-id (keemacs--xml-tag-text entry 'CustomIconUUID))
              (title (cdr (assoc "Title" fields)))
              (path (concat group-path "/" title)))
         (when (and custom-id (not (string-empty-p custom-id)))
           (push (cons path (string-trim custom-id))
-                keepass-browse--entry-custom-icons))
+                keemacs--entry-custom-icons))
         (push (cons path (concat group-path "/"))
-              keepass-browse--entry-parents)
+              keemacs--entry-parents)
         (setq acc (cons (cons path fields) acc))))
     ;; Recurse into child groups, extending the path with the group name.
-    (dolist (subgroup (keepass-browse--xml-children-tag node 'Group))
-      (let ((name (keepass-browse--xml-tag-text subgroup 'Name)))
-        (setq acc (nconc (keepass-browse--collect
+    (dolist (subgroup (keemacs--xml-children-tag node 'Group))
+      (let ((name (keemacs--xml-tag-text subgroup 'Name)))
+        (setq acc (nconc (keemacs--collect
                           subgroup (concat group-path "/" name))
                          acc))))
     acc))
 
-(defun keepass-browse--collect-groups (node group-path)
+(defun keemacs--collect-groups (node group-path)
   "Record icon info for the child groups of NODE at GROUP-PATH.
-Each child group is recorded in `keepass-browse--group-icons' as
+Each child group is recorded in `keemacs--group-icons' as
 PATH -> (ICON-ID . CUSTOM-UUID), then recursed into.  NODE should be a
 group element whose own name is GROUP-PATH's business -- `--load-entries'
 starts below the root group, so the root group's own name names no path,
 like entry paths.  The Recycle Bin subtree is filtered out afterwards."
-  (dolist (subgroup (keepass-browse--xml-children-tag node 'Group))
-    (let* ((name (keepass-browse--xml-tag-text subgroup 'Name))
+  (dolist (subgroup (keemacs--xml-children-tag node 'Group))
+    (let* ((name (keemacs--xml-tag-text subgroup 'Name))
            (path (concat group-path "/" name))
-           (icon-id (keepass-browse--xml-tag-text subgroup 'IconID))
-           (custom (keepass-browse--xml-tag-text subgroup 'CustomIconUUID)))
+           (icon-id (keemacs--xml-tag-text subgroup 'IconID))
+           (custom (keemacs--xml-tag-text subgroup 'CustomIconUUID)))
       (push (cons path
                   (cons icon-id
                         (and custom (not (string-empty-p custom))
                              (string-trim custom))))
-            keepass-browse--group-icons)
-      (keepass-browse--collect-groups subgroup path))))
+            keemacs--group-icons)
+      (keemacs--collect-groups subgroup path))))
 
-(defun keepass-browse--load-entries ()
+(defun keemacs--load-entries ()
   "Return ((PATH . FIELDS) ...) for the whole database, freshly.
 Does ONE export call and discards the result, so no entries are cached
 behind the scenes; database changes made elsewhere are always visible.
 Also captures the database's custom icon images, which entries use them
-(see `keepass-browse--custom-icons'), and the group tree's icons (see
-`keepass-browse--group-icons')."
-  (let* ((tree (keepass-browse--export))
-         (root (car (keepass-browse--xml-children-tag tree 'Root)))
+(see `keemacs--custom-icons'), and the group tree's icons (see
+`keemacs--group-icons')."
+  (let* ((tree (keemacs--export))
+         (root (car (keemacs--xml-children-tag tree 'Root)))
          (entries '()))
-    (setq keepass-browse--custom-icons
-          (keepass-browse--custom-icons-from tree)
-          keepass-browse--entry-custom-icons nil
-          keepass-browse--entry-parents nil
-          keepass-browse--group-icons nil)
-    (dolist (g (keepass-browse--xml-children-tag root 'Group))
+    (setq keemacs--custom-icons
+          (keemacs--custom-icons-from tree)
+          keemacs--entry-custom-icons nil
+          keemacs--entry-parents nil
+          keemacs--group-icons nil)
+    (dolist (g (keemacs--xml-children-tag root 'Group))
       ;; Start below the root group: its own name names no path, exactly
-      ;; like `keepass-browse--collect' for entries.
-      (setq entries (append entries (keepass-browse--collect g "")))
-      (keepass-browse--collect-groups g ""))
+      ;; like `keemacs--collect' for entries.
+      (setq entries (append entries (keemacs--collect g "")))
+      (keemacs--collect-groups g ""))
     ;; The Recycle Bin subtree is excluded from the group map, matching the
     ;; entry filter below.
-    (setq keepass-browse--group-icons
+    (setq keemacs--group-icons
           (seq-filter (lambda (g)
                         (not (string-prefix-p "/Recycle Bin" (car g))))
-                      keepass-browse--group-icons))
+                      keemacs--group-icons))
     ;; `keepassxc-cli rm' moves deleted entries to the Recycle Bin; exclude
     ;; them so a rename (add-new + delete-old) does not show a duplicate.
     (seq-filter (lambda (e)
                   (not (string-prefix-p "/Recycle Bin/" (car e))))
                 entries)))
 
-(defun keepass-browse--entry-directory (path)
+(defun keemacs--entry-directory (path)
   "Return the directory part of KeePass entry PATH, trailing slash included.
 Examples: \"/a/b\" -> \"/a/\", \"/b\" -> \"/\", \"/\" -> \"/\", \"\" -> \"\".
 Pure string arithmetic: entry paths are record paths that just happen to
@@ -532,31 +530,31 @@ would raise \"Method `Apple' is not known\"."
     (let ((pos (string-match "/[^/]*\\'" path)))
       (if pos (substring path 0 (1+ pos)) "/"))))
 
-(defun keepass-browse--entry-basename (path)
+(defun keemacs--entry-basename (path)
   "Return the last path segment of KeePass entry PATH.
 Examples: \"/a/b\" -> \"b\", \"/b\" -> \"b\", \"/\" -> \"\".  Pure string
-arithmetic -- see `keepass-browse--entry-directory'."
+arithmetic -- see `keemacs--entry-directory'."
   (if (string-match "/[^/]*\\'" path)
       (substring path (1+ (match-beginning 0)))
     path))
 
-(defun keepass-browse--entry-group (path)
+(defun keemacs--entry-group (path)
   "Return the real group of the entry at PATH, trailing slash included.
 The parent recorded from the export tree when known (a title containing
 \"/\" mis-splits the path string), else derived from the path."
-  (or (cdr (assoc path keepass-browse--entry-parents))
-      (keepass-browse--entry-directory path)))
+  (or (cdr (assoc path keemacs--entry-parents))
+      (keemacs--entry-directory path)))
 
-(defun keepass-browse--group-contents (entries group)
+(defun keemacs--group-contents (entries group)
   "Return the immediate children of GROUP in ENTRIES.
 ENTRIES is a list of (PATH . FIELDS) pairs as returned by
-`keepass-browse--load-entries'.  GROUP names a group: a path ending in
+`keemacs--load-entries'.  GROUP names a group: a path ending in
 \"/\" (e.g. \"/Internet/\"), or \"/\" for the root group; a missing
 trailing slash is added.  Returns (GROUPS . ENTRIES), where GROUPS is the
 list of child group paths (each ending in \"/\") and ENTRIES the child
 entry (PATH . FIELDS) pairs, both sorted by path.  Subgroups come both
 from the entry paths and from the group tree recorded in
-`keepass-browse--group-icons', so empty groups are included."
+`keemacs--group-icons', so empty groups are included."
   (let* ((group (if (string-suffix-p "/" group) group (concat group "/")))
          (in-group nil)
          (subgroups nil))
@@ -571,7 +569,7 @@ from the entry paths and from the group tree recorded in
             (when (string-equal entry-group group)
               (push entry in-group))
           ;; No recorded group (synthetic data): fall back to the path.
-          (when (string-equal (keepass-browse--entry-directory path) group)
+          (when (string-equal (keemacs--entry-directory path) group)
             (push entry in-group))
           ;; A path strictly deeper than GROUP contributes its next segment as a
           ;; subgroup; a direct child entry (rest has no "/") is just that.
@@ -584,7 +582,7 @@ from the entry paths and from the group tree recorded in
     ;; Groups recorded from the export tree: unlike the entry-derived
     ;; segments above, these include empty groups.  A recorded path is the
     ;; group itself, so even a direct child (rest without "/") contributes.
-    (dolist (g keepass-browse--group-icons)
+    (dolist (g keemacs--group-icons)
       (let ((p (car g)))
         (when (string-prefix-p group p)
           (let* ((rest (substring p (length group)))
@@ -601,7 +599,7 @@ from the entry paths and from the group tree recorded in
 ;; character approximating the artwork, so candidates can be prefixed with a
 ;; glyph instead of shipping or rendering the SVG set.  Where the artwork has
 ;; no direct unicode equivalent the closest imaginative stand-in is used.
-(defconst keepass-browse--icon-chars
+(defconst keemacs--icon-chars
   ["🔑"  ;  0 password (key)
    "🌍"  ;  1 network (world)
    "⚠️"  ;  2 warning
@@ -673,15 +671,15 @@ from the entry paths and from the group tree recorded in
    "📱"  ; 68 mobile
    ]
   "Unicode glyph for each standard KeePass icon ID (0..68).
-Indexed by IconID; see `keepass-browse--icon-char'.")
+Indexed by IconID; see `keemacs--icon-char'.")
 
-(defun keepass-browse--icon-char (entry)
+(defun keemacs--icon-char (entry)
   "Return the unicode glyph for ENTRY's standard icon, or \"\".
 ENTRY is a (FIELD . VALUE) alist carrying an \"IconID\" when it came from
 a database export; entries without one (e.g. from `show') get no glyph."
   (let* ((id (cdr (assoc "IconID" entry)))
          (n (and id (string-to-number id)))
-         (chars keepass-browse--icon-chars))
+         (chars keemacs--icon-chars))
     (if (and n (>= n 0) (< n (length chars)))
         (aref chars n)
       "")))
@@ -693,117 +691,117 @@ a database export; entries without one (e.g. from `show') get no glyph."
 ;; UUID, and each entry points at one with a CustomIconUUID.  `export'
 ;; hands us both, so the images can be decoded and shown as real pictures.
 
-(defun keepass-browse--custom-icons-from (tree)
+(defun keemacs--custom-icons-from (tree)
   "Return ((UUID . BYTES)) for the custom icons in export XML TREE.
 Each base64 Data blob is decoded; UUID is the entry-level
 CustomIconUUID spelling."
-  (let* ((meta (car (keepass-browse--xml-children-tag tree 'Meta)))
-         (icons (car (keepass-browse--xml-children-tag meta 'CustomIcons))))
+  (let* ((meta (car (keemacs--xml-children-tag tree 'Meta)))
+         (icons (car (keemacs--xml-children-tag meta 'CustomIcons))))
     (mapcar (lambda (icon)
-              (cons (string-trim (keepass-browse--xml-tag-text icon 'UUID))
+              (cons (string-trim (keemacs--xml-tag-text icon 'UUID))
                     (base64-decode-string
                      (replace-regexp-in-string
                       "[\n\r\t ]" ""
-                      (keepass-browse--xml-tag-text icon 'Data)))))
-            (keepass-browse--xml-children-tag icons 'Icon))))
+                      (keemacs--xml-tag-text icon 'Data)))))
+            (keemacs--xml-children-tag icons 'Icon))))
 
-(defcustom keepass-browse-icon-scale 0.8
+(defcustom keemacs-icon-scale 0.8
   "Size multiplier for custom icon images, relative to the line height.
 1.0 is exactly the height of a line of text; emoji glyphs tend to render
 a touch larger than that (and icon PNGs often carry transparent padding),
 so the default is slightly above 1 to visually match the unicode glyphs
 used for standard icons."
   :type 'number
-  :group 'keepass-browse)
+  :group 'keemacs)
 
-(defun keepass-browse--icon-pixels (&optional scale)
+(defun keemacs--icon-pixels (&optional scale)
   "Return the pixel size for a custom icon at SCALE.
 The picker matches the height of a unicode glyph, which renders at about
 the default frame character height; the view buffer uses a multiple."
   (let ((h (condition-case nil (frame-char-height) (error 16))))
-    (max 8 (round (* keepass-browse-icon-scale (or scale 1.0) h)))))
+    (max 8 (round (* keemacs-icon-scale (or scale 1.0) h)))))
 
-(defun keepass-browse--custom-icon-image (uuid &optional max)
+(defun keemacs--custom-icon-image (uuid &optional max)
   "Return an image for custom icon UUID scaled to MAX pixels tall, or nil.
-MAX defaults to one glyph height (see `keepass-browse--icon-pixels').
+MAX defaults to one glyph height (see `keemacs--icon-pixels').
 The image is scaled to exactly MAX via `:height' -- unlike `:max-width'
 and `:max-height', which only shrink oversized images and would leave a
 small icon (e.g. a 16x16 favicon) at its natural size no matter what
 scale was asked for.  Images are created once and cached.  Returns nil
 when UUID is unknown or the bytes are not a renderable image."
-  (let ((max (or max (keepass-browse--icon-pixels))))
-    (when-let* ((bytes (cdr (assoc uuid keepass-browse--custom-icons)))
+  (let ((max (or max (keemacs--icon-pixels))))
+    (when-let* ((bytes (cdr (assoc uuid keemacs--custom-icons)))
                 (key (cons uuid max)))
-      (or (cdr (assoc key keepass-browse--icon-image-cache))
+      (or (cdr (assoc key keemacs--icon-image-cache))
           (let ((img (condition-case nil
                          (create-image bytes 'png t
                                        :height max
                                        :ascent 'center)
                        (error nil))))
             (when img
-              (push (cons key img) keepass-browse--icon-image-cache))
+              (push (cons key img) keemacs--icon-image-cache))
             img)))))
 
-(defun keepass-browse--candidate-prefix (path entry)
+(defun keemacs--candidate-prefix (path entry)
   "Return the display prefix for the entry at PATH with fields ENTRY.
 A real thumbnail of the entry's custom icon on graphic displays,
 otherwise the unicode glyph for its standard icon."
-  (if-let* ((uuid (cdr (assoc path keepass-browse--entry-custom-icons)))
+  (if-let* ((uuid (cdr (assoc path keemacs--entry-custom-icons)))
             (img (and (display-graphic-p)
-                      (keepass-browse--custom-icon-image uuid))))
+                      (keemacs--custom-icon-image uuid))))
       (propertize " " 'display img)
-    (keepass-browse--icon-char entry)))
+    (keemacs--icon-char entry)))
 
-(defun keepass-browse--format-candidate (path entry)
+(defun keemacs--format-candidate (path entry)
   "Return a display string for ENTRY at PATH, tagged with `kb-path'.
 The line is prefixed with a picture of the entry's custom icon when it
 has one, else a unicode glyph approximating its standard icon (see
-`keepass-browse--icon-chars')."
-  (let* ((prefix (keepass-browse--candidate-prefix path entry))
+`keemacs--icon-chars')."
+  (let* ((prefix (keemacs--candidate-prefix path entry))
          (str (concat prefix
                       (when (not (string-empty-p prefix)) " ")
                       (mapconcat
                        (lambda (f)
-                         (truncate-string-to-width (keepass-browse--field entry f)
-                                                   keepass-browse-field-width 0 ?\s))
-                       keepass-browse-fields "\t"))))
+                         (truncate-string-to-width (keemacs--field entry f)
+                                                   keemacs-field-width 0 ?\s))
+                       keemacs-fields "\t"))))
     (put-text-property 0 (length str) 'kb-path path str)
     str))
 
-(defun keepass-browse--group-prefix (path)
+(defun keemacs--group-prefix (path)
   "Return the display prefix for the group at PATH.
 A real thumbnail of the group's custom icon on graphic displays,
 otherwise the unicode glyph for its standard icon (48, a folder, is the
 keepassxc default for groups)."
   (let* ((trimmed (if (string-suffix-p "/" path) (substring path 0 -1) path))
-         (info (cdr (assoc trimmed keepass-browse--group-icons)))
+         (info (cdr (assoc trimmed keemacs--group-icons)))
          (custom (cdr info)))
     (if-let* ((img (and custom
                         (display-graphic-p)
-                        (keepass-browse--custom-icon-image custom))))
+                        (keemacs--custom-icon-image custom))))
         (propertize " " 'display img)
-      (keepass-browse--icon-char
+      (keemacs--icon-char
        `(("IconID" . ,(or (car info) "48")))))))
 
-(defun keepass-browse--format-group (path)
+(defun keemacs--format-group (path)
   "Return a display string for group PATH, tagged with `kb-path'.
 The line is prefixed with the group's icon: a custom thumbnail when the
 group has one, else the glyph for its standard icon."
   (let* ((trimmed (if (string-suffix-p "/" path) (substring path 0 -1) path))
-         (prefix (keepass-browse--group-prefix path))
+         (prefix (keemacs--group-prefix path))
          (str (concat prefix
                       " "
-                      (keepass-browse--entry-basename trimmed) "/")))
+                      (keemacs--entry-basename trimmed) "/")))
     (put-text-property 0 (length str) 'kb-path path str)
     str))
 
-(defun keepass-browse--candidates ()
+(defun keemacs--candidates ()
   "Return the candidate strings for the current database."
   (mapcar (lambda (c)
-            (keepass-browse--format-candidate (car c) (cdr c)))
-          (keepass-browse--load-entries)))
+            (keemacs--format-candidate (car c) (cdr c)))
+          (keemacs--load-entries)))
 
-(defun keepass-browse--path-of (candidate)
+(defun keemacs--path-of (candidate)
   "Return the entry path stored in CANDIDATE, or nil.
 Reads the path purely from CANDIDATE's `kb-path' text property.  The
 display text is never parsed back for the path, so a title/username column
@@ -812,128 +810,128 @@ that merely looks similar cannot resolve to the wrong entry."
 
 ;;; Clip and copy
 
-(defun keepass-browse--kill (value &optional msg)
+(defun keemacs--kill (value &optional msg)
   "Copy VALUE to the kill ring; optionally rearm the clear timer."
   (kill-new value)
-  (when (> keepass-browse-clear-clipboard-seconds 0)
-    (setq keepass-browse--last-killed value)
-    (when keepass-browse--clear-timer
-      (cancel-timer keepass-browse--clear-timer))
-    (setq keepass-browse--clear-timer
-          (run-with-timer keepass-browse-clear-clipboard-seconds nil
-                          #'keepass-browse--clear-clipboard)))
+  (when (> keemacs-clear-clipboard-seconds 0)
+    (setq keemacs--last-killed value)
+    (when keemacs--clear-timer
+      (cancel-timer keemacs--clear-timer))
+    (setq keemacs--clear-timer
+          (run-with-timer keemacs-clear-clipboard-seconds nil
+                          #'keemacs--clear-clipboard)))
   (message "%s" msg))
 
-(defun keepass-browse--clear-clipboard ()
+(defun keemacs--clear-clipboard ()
   "Clear the clipboard if it still holds the last value we copied."
-  (when (and keepass-browse--last-killed
-             (string-equal keepass-browse--last-killed (car kill-ring)))
+  (when (and keemacs--last-killed
+             (string-equal keemacs--last-killed (car kill-ring)))
     (kill-new ""))
-  (setq keepass-browse--last-killed nil))
+  (setq keemacs--last-killed nil))
 
-(defun keepass-browse--totp (path)
+(defun keemacs--totp (path)
   "Return the current TOTP for the entry at PATH, or nil."
-  (setq path (or (keepass-browse--path-of path) path)) ; resolve padded target
-  (let ((run (apply #'keepass-browse--run
-                    (keepass-browse--db-password)
+  (setq path (or (keemacs--path-of path) path)) ; resolve padded target
+  (let ((run (apply #'keemacs--run
+                    (keemacs--db-password)
                     (list "show" "--quiet" "--totp"
-                          (keepass-browse--database-path) path))))
+                          (keemacs--database-path) path))))
     (when (eq (cdr run) 0)
       (string-trim (car run)))))
 
 ;;; Actions (each takes an entry path)
 
-(defun keepass-browse-copy-title (path)
+(defun keemacs-copy-title (path)
   "Copy the title of the entry at PATH."
   (interactive "sEntry path: ")
-  (keepass-browse--kill (keepass-browse--field (keepass-browse--entry-get path) "Title")
+  (keemacs--kill (keemacs--field (keemacs--entry-get path) "Title")
                         (format "Title of %s copied" path)))
 
-(defun keepass-browse-copy-username (path)
+(defun keemacs-copy-username (path)
   "Copy the username of the entry at PATH."
   (interactive "sEntry path: ")
-  (keepass-browse--kill (keepass-browse--field (keepass-browse--entry-get path) "UserName")
+  (keemacs--kill (keemacs--field (keemacs--entry-get path) "UserName")
                         (format "Username of %s copied" path)))
 
-(defun keepass-browse-copy-password (path)
+(defun keemacs-copy-password (path)
   "Copy the password of the entry at PATH."
   (interactive "sEntry path: ")
-  (keepass-browse--kill (keepass-browse--field (keepass-browse--entry-get path) "Password")
+  (keemacs--kill (keemacs--field (keemacs--entry-get path) "Password")
                         "Password copied"))
 
-(defun keepass-browse-copy-url (path)
+(defun keemacs-copy-url (path)
   "Copy the URL of the entry at PATH."
   (interactive "sEntry path: ")
-  (keepass-browse--kill (keepass-browse--field (keepass-browse--entry-get path) "URL")
+  (keemacs--kill (keemacs--field (keemacs--entry-get path) "URL")
                         "URL copied"))
 
-(defun keepass-browse-copy-notes (path)
+(defun keemacs-copy-notes (path)
   "Copy the notes of the entry at PATH."
   (interactive "sEntry path: ")
-  (keepass-browse--kill (keepass-browse--field (keepass-browse--entry-get path) "Notes")
+  (keemacs--kill (keemacs--field (keemacs--entry-get path) "Notes")
                         "Notes copied"))
 
-(defun keepass-browse-copy-totp (path)
+(defun keemacs-copy-totp (path)
   "Copy the current TOTP of the entry at PATH."
   (interactive "sEntry path: ")
-  (let ((totp (keepass-browse--totp path)))
+  (let ((totp (keemacs--totp path)))
     (if totp
-        (keepass-browse--kill totp "TOTP copied")
+        (keemacs--kill totp "TOTP copied")
       (user-error "No TOTP available for %s" path))))
 
-(defun keepass-browse-insert-password (path)
+(defun keemacs-insert-password (path)
   "Insert the password of the entry at PATH at point."
   (interactive "sEntry path: ")
-  (insert (keepass-browse--field (keepass-browse--entry-get path) "Password")))
+  (insert (keemacs--field (keemacs--entry-get path) "Password")))
 
-(defun keepass-browse-insert-username (path)
+(defun keemacs-insert-username (path)
   "Insert the username of the entry at PATH at point."
   (interactive "sEntry path: ")
-  (insert (keepass-browse--field (keepass-browse--entry-get path) "UserName")))
+  (insert (keemacs--field (keemacs--entry-get path) "UserName")))
 
-(defun keepass-browse-reveal-password (path)
+(defun keemacs-reveal-password (path)
   "Copy the password of the entry at PATH to the kill ring, revealing it."
   (interactive "sEntry path: ")
   (when (button-at (point)) (forward-button 1)) ; move off the revealed text
-  (let ((entry (keepass-browse--entry-get path)))
-    (keepass-browse--kill (keepass-browse--field entry "Password")
+  (let ((entry (keemacs--entry-get path)))
+    (keemacs--kill (keemacs--field entry "Password")
                           "Password copied to clipboard")))
 
-(defvar-local keepass-browse-view--revealed nil
+(defvar-local keemacs-view--revealed nil
   "Non-nil while the password is shown in the current view buffer.")
 
-(defvar-local keepass-browse-view-path nil
-  "The entry path shown in `keepass-browse-view-mode'.")
+(defvar-local keemacs-view-path nil
+  "The entry path shown in `keemacs-view-mode'.")
 
-(defconst keepass-browse-view-mode-map
+(defconst keemacs-view-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     ;; Each action operates on the entry being viewed.
-    (pcase-dolist (`(,key ,_label ,fn) keepass-browse--actions)
+    (pcase-dolist (`(,key ,_label ,fn) keemacs--actions)
       (define-key map (kbd key)
         (lambda ()
           (interactive)
-          (funcall fn keepass-browse-view-path))))
-    (define-key map (kbd "r") #'keepass-browse-view-reveal)
+          (funcall fn keemacs-view-path))))
+    (define-key map (kbd "r") #'keemacs-view-reveal)
     (define-key map (kbd "q") #'quit-window)
     (define-key map (kbd "C-.") #'embark-act)
     map)
-  "Keymap for `keepass-browse-view-mode', generated from
-`keepass-browse--actions'; each action operates on the viewed entry.  The
+  "Keymap for `keemacs-view-mode', generated from
+`keemacs--actions'; each action operates on the viewed entry.  The
 password reveal (r) and quit (q) are view-only.")
 
-(define-derived-mode keepass-browse-view-mode special-mode "kb-view"
+(define-derived-mode keemacs-view-mode special-mode "kb-view"
   "Major mode for viewing a KeePass entry.  Password is hidden until
-\\[keepass-browse-view-reveal].")
+\\[keemacs-view-reveal].")
 
-(defun keepass-browse--view-menu ()
+(defun keemacs--view-menu ()
   "Return the key menu shown at the bottom of the view buffer.
-Generated from `keepass-browse--actions' plus the view-only reveal and
+Generated from `keemacs--actions' plus the view-only reveal and
 quit, laid out in two columns.  The view action itself is omitted: this
 menu is only shown when already viewing an entry."
   (let* ((items (append (seq-filter
                          (lambda (i) (not (equal (car i) "v")))
-                         keepass-browse--actions)
+                         keemacs--actions)
                         '(("r" "reveal password")
                           ("q" "quit"))))
          (half (ceiling (length items) 2))
@@ -948,33 +946,33 @@ menu is only shown when already viewing an entry."
               rows)))
     (concat "\n\n" (string-join (nreverse rows) "\n"))))
 
-(defun keepass-browse--spec-label (spec)
+(defun keemacs--spec-label (spec)
   "Return a user-visible label for database spec SPEC.
 The spec's `:name', or the file name for a spec without one."
-  (let ((spec (keepass-db-spec-normalize spec)))
-    (or (keepass-db-spec-name spec)
-        (file-name-nondirectory (keepass-db-spec-file spec)))))
+  (let ((spec (keemacs-auth-db-spec-normalize spec)))
+    (or (keemacs-auth-db-spec-name spec)
+        (file-name-nondirectory (keemacs-auth-db-spec-file spec)))))
 
-(defun keepass-browse--database-name ()
+(defun keemacs--database-name ()
   "Return the user-visible name of the active database, or nil."
-  (when keepass-browse-database
-    (keepass-browse--spec-label keepass-browse-database)))
+  (when keemacs-database
+    (keemacs--spec-label keemacs-database)))
 
-(defun keepass-browse-view-update (reveal)
+(defun keemacs-view-update (reveal)
   "Redraw the current view buffer, revealing the password when REVEAL.
 The password appears once, on its own line after the username.  It is hidden
-until toggled with `keepass-browse-view-reveal', unless it is empty, in
+until toggled with `keemacs-view-reveal', unless it is empty, in
 which case there is nothing to hide."
-  (let* ((entry (keepass-browse--entry-get keepass-browse-view-path))
-         (pw-field (keepass-browse--field entry "Password"))
+  (let* ((entry (keemacs--entry-get keemacs-view-path))
+         (pw-field (keemacs--field entry "Password"))
          (pw (if (or reveal (string-blank-p pw-field))
                  pw-field
                "[hidden - press r]"))
-         (icon (when-let* ((uuid (cdr (assoc keepass-browse-view-path
-                                             keepass-browse--entry-custom-icons)))
+         (icon (when-let* ((uuid (cdr (assoc keemacs-view-path
+                                             keemacs--entry-custom-icons)))
                            (img (and (display-graphic-p)
-                                     (keepass-browse--custom-icon-image
-                                      uuid (keepass-browse--icon-pixels 2)))))
+                                     (keemacs--custom-icon-image
+                                      uuid (keemacs--icon-pixels 2)))))
                   img)))
     (let ((inhibit-read-only t))
       (erase-buffer)
@@ -983,132 +981,132 @@ which case there is nothing to hide."
         (insert-image icon)
         (insert "\n\n"))
       ;; Show which database this entry came from when several are configured.
-      (when (> (length keepass-browse-databases) 1)
+      (when (> (length keemacs-databases) 1)
         (insert (format "%-10s %s\n" "Database"
-                        (or (keepass-browse--database-name) "(unknown)"))))
+                        (or (keemacs--database-name) "(unknown)"))))
       (insert (format "%-10s %s\n" "Group"
-                      (keepass-browse--entry-group
-                       keepass-browse-view-path)))
+                      (keemacs--entry-group
+                       keemacs-view-path)))
       (dolist (f '("Title" "UserName"))
-        (insert (format "%-10s %s\n" f (keepass-browse--field entry f))))
+        (insert (format "%-10s %s\n" f (keemacs--field entry f))))
       (insert (format "%-10s %s\n" "Password" pw))
       (dolist (f '("URL" "Notes"))
-        (insert (format "%-10s %s\n" f (keepass-browse--field entry f))))
-      (insert (keepass-browse--view-menu)))
+        (insert (format "%-10s %s\n" f (keemacs--field entry f))))
+      (insert (keemacs--view-menu)))
     (goto-char (point-min)))
   (setq buffer-read-only t))
 
-(defun keepass-browse-view-reveal ()
+(defun keemacs-view-reveal ()
   "Toggle showing the password in the view buffer.
 A press reveals the password; a second press hides it again.  Revealing
 does not copy -- copying is the `p' action.  Does nothing for an entry
 with no password."
   (interactive)
-  (if (string-blank-p (keepass-browse--field
-                       (keepass-browse--entry-get keepass-browse-view-path)
+  (if (string-blank-p (keemacs--field
+                       (keemacs--entry-get keemacs-view-path)
                        "Password"))
       (message "No password for this entry")
-    (setq-local keepass-browse-view--revealed
-                (not keepass-browse-view--revealed))
-    (keepass-browse-view-update keepass-browse-view--revealed)))
+    (setq-local keemacs-view--revealed
+                (not keemacs-view--revealed))
+    (keemacs-view-update keemacs-view--revealed)))
 
-(defun keepass-browse-view-copy-username ()
+(defun keemacs-view-copy-username ()
   "Copy the username of the entry in the view buffer."
   (interactive)
-  (keepass-browse--kill (keepass-browse--field
-                         (keepass-browse--entry-get keepass-browse-view-path)
+  (keemacs--kill (keemacs--field
+                         (keemacs--entry-get keemacs-view-path)
                          "UserName")
                         "Username copied"))
 
-(defun keepass-browse-view-copy-password ()
+(defun keemacs-view-copy-password ()
   "Copy the password of the entry in the view buffer."
   (interactive)
-  (keepass-browse-reveal-password keepass-browse-view-path))
+  (keemacs-reveal-password keemacs-view-path))
 
-(defun keepass-browse-view-edit ()
+(defun keemacs-view-edit ()
   "Edit the entry shown in the view buffer."
   (interactive)
-  (keepass-browse-edit keepass-browse-view-path))
+  (keemacs-edit keemacs-view-path))
 
-(defun keepass-browse-view (path)
+(defun keemacs-view (path)
   "View the entry at PATH, hiding its password until a key reveals it."
   (interactive "sEntry path: ")
   ;; An entry's custom icon is only known from an export; if this view was
   ;; not reached through a browse listing, load once so the icon is there.
-  (unless (assoc path keepass-browse--entry-custom-icons)
-    (keepass-browse--load-entries))
-  (let ((buf (get-buffer-create "*keepass-browse-view*")))
+  (unless (assoc path keemacs--entry-custom-icons)
+    (keemacs--load-entries))
+  (let ((buf (get-buffer-create "*keemacs-view*")))
     (with-current-buffer buf
-      (keepass-browse-view-mode)
-      (setq-local keepass-browse-view-path path)
-      (keepass-browse-view-update nil))
+      (keemacs-view-mode)
+      (setq-local keemacs-view-path path)
+      (keemacs-view-update nil))
     (switch-to-buffer buf)))
 
-(defun keepass-browse-view-refresh (&optional new-path)
+(defun keemacs-view-refresh (&optional new-path)
   "Redraw the open view buffer from the (reloaded) database.
 NEW-PATH, when given, re-points the view at the entry's new path (after a
 rename).  Does nothing if no view buffer is open."
-  (let ((buf (get-buffer "*keepass-browse-view*")))
+  (let ((buf (get-buffer "*keemacs-view*")))
     (when buf
       (with-current-buffer buf
         (when new-path
-          (setq-local keepass-browse-view-path new-path))
-        (keepass-browse-view-update keepass-browse-view--revealed)))))
+          (setq-local keemacs-view-path new-path))
+        (keemacs-view-update keemacs-view--revealed)))))
 
 
 ;;; Entry buffer (add / clone / edit)
 
-(defvar-local keepass-browse--entry-action nil
+(defvar-local keemacs--entry-action nil
   "For the entry buffer: the action being performed (add/edit).")
-(defvar-local keepass-browse--entry-original nil
+(defvar-local keemacs--entry-original nil
   "For the entry buffer: the original path being edited, if any.")
 
-(defconst keepass-browse-entry-mode-map
+(defconst keemacs-entry-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'keepass-browse--entry-commit)
+    (define-key map (kbd "C-c C-c") #'keemacs--entry-commit)
     (define-key map (kbd "C-c C-k") #'kill-buffer-and-window)
-    (define-key map (kbd "C-c C-r") #'keepass-browse--entry-regenerate)
+    (define-key map (kbd "C-c C-r") #'keemacs--entry-regenerate)
     ;; Not C-c C-g: a C-g after a prefix key is specially handled by Emacs
     ;; as "cancel the prefix" and can never be dispatched to a binding.
-    (define-key map (kbd "C-c C-p") #'keepass-browse--entry-choose-group)
-    (define-key map (kbd "TAB") #'keepass-browse--entry-next-field)
+    (define-key map (kbd "C-c C-p") #'keemacs--entry-choose-group)
+    (define-key map (kbd "TAB") #'keemacs--entry-next-field)
     map)
-  "Keymap for `keepass-browse-entry-mode'.")
+  "Keymap for `keemacs-entry-mode'.")
 
-(define-minor-mode keepass-browse-entry-mode
+(define-minor-mode keemacs-entry-mode
   "Minor mode for editing a KeePass entry as a text buffer.
 
 Keys:
-\\<keepass-browse-entry-mode-map>
-\\[keepass-browse--entry-commit]  commit this entry
-\\[keepass-browse--entry-choose-group]  choose the entry's group by completion
-\\[keepass-browse--entry-regenerate]  regenerate the password
+\\<keemacs-entry-mode-map>
+\\[keemacs--entry-commit]  commit this entry
+\\[keemacs--entry-choose-group]  choose the entry's group by completion
+\\[keemacs--entry-regenerate]  regenerate the password
 \\[kill-buffer-and-window]  cancel and close
-\\[keepass-browse--entry-next-field]  next field"
+\\[keemacs--entry-next-field]  next field"
   :lighter " Kb-Entry"
-  :keymap keepass-browse-entry-mode-map)
+  :keymap keemacs-entry-mode-map)
 
-(defconst keepass-browse--entry-hint
+(defconst keemacs--entry-hint
   ";; Keys: C-c C-c commit | C-c C-p select group
 ;; Keys: C-c C-r regenerate password | C-c C-k cancel"
   "Comment lines shown at the top of entry buffers.
-They are ignored by `keepass-browse--parse-entry' (which only reads
+They are ignored by `keemacs--parse-entry' (which only reads
 recognized `Field: value' lines), so they never reach the database.")
 
-(defun keepass-browse--entry-next-field ()
+(defun keemacs--entry-next-field ()
   "Move to the next \"Field: value\" line."
   (interactive)
   (if (re-search-forward "^[A-Za-z]+: " nil t)
       (goto-char (match-beginning 0))
     (goto-char (point-min))))
 
-(defun keepass-browse--generate-args (label length)
+(defun keemacs--generate-args (label length)
   "Return the keepassxc-cli command for generation option LABEL.
 LABEL is the label of an entry (LABEL ARGS) in
-`keepass-browse-generate-options'; the returned list is ARGS with every
+`keemacs-generate-options'; the returned list is ARGS with every
 `:length' placeholder replaced by LENGTH.  ARGS begins with the
 subcommand (\"generate\" or \"diceware\")."
-  (let ((args (cadr (assoc label keepass-browse-generate-options))))
+  (let ((args (cadr (assoc label keemacs-generate-options))))
     (unless args
       (user-error "Unknown password generation option: %S" label))
     ;; `call-process' takes only strings, so the numeric length becomes a
@@ -1116,20 +1114,20 @@ subcommand (\"generate\" or \"diceware\")."
     (mapcar (lambda (a) (if (eq a :length) (number-to-string length) a))
             args)))
 
-(defun keepass-browse--read-charset ()
+(defun keemacs--read-charset ()
   "Prompt for a password character set, with a nice descriptive label.
-Completes over the labels of `keepass-browse-generate-options',
-defaulting to `keepass-browse--last-generated-charset' when set, else to
+Completes over the labels of `keemacs-generate-options',
+defaulting to `keemacs--last-generated-charset' when set, else to
 the first entry; remembers the choice for next time.  Returns the label."
-  (let* ((labels (mapcar #'car keepass-browse-generate-options))
-         (default-label (or keepass-browse--last-generated-charset
+  (let* ((labels (mapcar #'car keemacs-generate-options))
+         (default-label (or keemacs--last-generated-charset
                             (car labels)))
          (chosen (completing-read "Password character set: "
                                   labels nil t nil nil default-label)))
-    (setq keepass-browse--last-generated-charset chosen)
+    (setq keemacs--last-generated-charset chosen)
     chosen))
 
-(defun keepass-browse--generate-failure-message (charset output)
+(defun keemacs--generate-failure-message (charset output)
   "Return a helpful message for a failed generation with CHARSET and OUTPUT.
 keepassxc-cli reports \"Invalid password generator after applying all
 options\" when the requested length is too short for the chosen character
@@ -1139,48 +1137,48 @@ classes; this advises a longer length instead of showing the raw error."
               charset)
     "Could not generate password (keepassxc-cli failed)"))
 
-(defun keepass-browse--entry-regenerate ()
+(defun keemacs--entry-regenerate ()
   "Insert a generated password into the Password line.
 Asks for a character set (with a descriptive title, remembering the last
-one chosen) and a length (defaulting to `keepass-browse-generate-length'
+one chosen) and a length (defaulting to `keemacs-generate-length'
 or the last length used)."
   (interactive)
   (when (re-search-forward "^Password: " nil t)
-    (let* ((charset (keepass-browse--read-charset))
+    (let* ((charset (keemacs--read-charset))
            (len (read-number "Password length: "
-                             (or keepass-browse--last-generated-length
-                                 keepass-browse-generate-length)))
-           (run (apply #'keepass-auth-source--keepassxc-run ""
-                       (keepass-browse--generate-args charset len))))
-      (setq keepass-browse--last-generated-length len)
+                             (or keemacs--last-generated-length
+                                 keemacs-generate-length)))
+           (run (apply #'keemacs-auth--keepassxc-run ""
+                       (keemacs--generate-args charset len))))
+      (setq keemacs--last-generated-length len)
       (if (eq (cdr run) 0)
           (progn
             (delete-region (point) (line-end-position))
             (insert (string-trim (car run))))
-        (message "%s" (keepass-browse--generate-failure-message
+        (message "%s" (keemacs--generate-failure-message
                        charset (car run))))))
   (goto-char (point-min)))
 
-(defun keepass-browse--entry-open (name action path &optional template)
+(defun keemacs--entry-open (name action path &optional template)
   "Open an entry buffer NAME for ACTION on PATH (or nil to add).
 TEMPLATE is the initial text; defaults to blank standard fields.
 The freshly-inserted template is marked unmodified, so the buffer does
 not look dirty until you actually change something.  Returns the buffer."
   (let ((buf (generate-new-buffer name)))
     (with-current-buffer buf
-      (insert keepass-browse--entry-hint "\n")
+      (insert keemacs--entry-hint "\n")
       (insert (or template
                   (mapconcat (lambda (f) (format "%s: " f))
                              '("Group" "Title" "UserName" "Password" "URL" "Notes") "\n")))
       (goto-char (point-min))
-      (keepass-browse-entry-mode)
-      (setq-local keepass-browse--entry-action action)
-      (setq-local keepass-browse--entry-original path)
+      (keemacs-entry-mode)
+      (setq-local keemacs--entry-action action)
+      (setq-local keemacs--entry-original path)
       (set-buffer-modified-p nil))
     (switch-to-buffer buf)
     buf))
 
-(defun keepass-browse--parse-entry ()
+(defun keemacs--parse-entry ()
   "Parse the current entry buffer into a FIELD . VALUE alist.
 Each field is a single line, except Notes, which extends from after
 \"Notes: \" to the end of the buffer, so multi-line notes are preserved.
@@ -1202,53 +1200,53 @@ group path ending in \"/\" -- shown above Title."
 
 ;;; Add / edit / clone / delete
 
-(defun keepass-browse-add (&optional target)
+(defun keemacs-add (&optional target)
   "Add a new entry, in group TARGET's group or a chosen one.
 When invoked as an Embark action, TARGET is the selected entry's path and
 the new entry is created in the same group as that entry.  When called
 directly (M-x or from the command keymap), the group is chosen by
 completion -- there is no entry-path prompt.  Fill in the Title and the
 other fields in the buffer that opens, then commit with
-`keepass-browse--entry-commit' (C-c C-c)."
+`keemacs--entry-commit' (C-c C-c)."
   (interactive)
-  (keepass-browse--require-db)
+  (keemacs--require-db)
   (let* ((group (if (and target (not (string-blank-p target)))
                     ;; Same group as the selected entry; pure string ops
-                    ;; only (see `keepass-browse--entry-group').
-                    (keepass-browse--entry-group
+                    ;; only (see `keemacs--entry-group').
+                    (keemacs--entry-group
                      (concat "/" (string-trim-left target "/")))
-                  (keepass-browse--choose-group))))
-    (keepass-browse--entry-open "*keepass-browse-add*" "add" nil
+                  (keemacs--choose-group))))
+    (keemacs--entry-open "*keemacs-add*" "add" nil
                                 (format "Group: %s\nTitle: \nUserName: \nPassword: \nURL: \nNotes: \n" group))))
 
-(defun keepass-browse--choose-group ()
+(defun keemacs--choose-group ()
   "Choose a KeePass group path by completion (ends in /).
 The root group \"/\" is always offered, and is the default -- RET alone
 puts the new entry at the top level of the database."
-  (let ((groups (cons "/" (keepass-browse--group-paths))))
+  (let ((groups (cons "/" (keemacs--group-paths))))
     (completing-read "Group (RET for root): " groups nil nil nil nil "/")))
 
 ;;; Group maintenance
 
-(defun keepass-browse--run-group-cmd (subcommand group)
+(defun keemacs--run-group-cmd (subcommand group)
   "Run keepassxc-cli SUBCOMMAND (mkdir or rmdir) on GROUP.
 Signals an error on failure."
-  (let ((run (apply #'keepass-browse--run
-                    (keepass-browse--db-password)
+  (let ((run (apply #'keemacs--run
+                    (keemacs--db-password)
                     (list subcommand "--quiet"
-                          (keepass-browse--database-path) group))))
+                          (keemacs--database-path) group))))
     (unless (eq (cdr run) 0)
-      (keepass-browse--error (car run) (cdr run)))))
+      (keemacs-auth--error (car run) (keemacs--database-path) (cdr run)))))
 
-(defun keepass-browse-add-group (&optional parent)
+(defun keemacs-add-group (&optional parent)
   "Create a new group inside group PARENT.
 When called as a command (M-x or the command keymap), PARENT is chosen
 by completion over the existing groups, the root \"/\" being the
 default; then the new group's name is prompted for.  When invoked from
  Lisp, PARENT may be a group path (\"/\" or ending in \"/\")."
   (interactive)
-  (keepass-browse--require-db)
-  (let* ((parent (or parent (keepass-browse--choose-group)))
+  (keemacs--require-db)
+  (let* ((parent (or parent (keemacs--choose-group)))
          (name (read-string (format "New group under %s: " parent))))
     (when (string-blank-p name)
       (user-error "Group name may not be empty"))
@@ -1258,21 +1256,21 @@ default; then the new group's name is prompted for.  When invoked from
                             (substring parent 0 -1)
                           parent)
                         "/" name)))
-      (keepass-browse--run-group-cmd "mkdir" path)
+      (keemacs--run-group-cmd "mkdir" path)
       (message "Created group %s" path))))
 
-(defun keepass-browse-delete-group (&optional group)
+(defun keemacs-delete-group (&optional group)
   "Delete the KeePass group GROUP.
 GROUP is chosen by completion (the root \"/\" cannot be deleted).
 keepassxc-cli recycles the group: the whole subtree, entries included,
 moves to the Recycle Bin and can be restored from the GUI."
   (interactive)
-  (keepass-browse--require-db)
+  (keemacs--require-db)
   (let* ((group (or group
                     ;; Offer only real groups for deletion -- the root
                     ;; cannot be deleted.
                     (completing-read "Delete group: "
-                                     (keepass-browse--group-paths)
+                                     (keemacs--group-paths)
                                      nil t)))
          (group (directory-file-name group)))
     (when (string-empty-p group)
@@ -1280,18 +1278,18 @@ moves to the Recycle Bin and can be restored from the GUI."
     (when (string-prefix-p "/Recycle Bin" group)
       (user-error "Cannot delete the Recycle Bin"))
     (when (yes-or-no-p (format "Delete group %s and everything in it (entries go to the Recycle Bin)? " group))
-      (keepass-browse--run-group-cmd "rmdir" group)
+      (keemacs--run-group-cmd "rmdir" group)
       (message "Deleted group %s (recycled)" group))))
 
-(defun keepass-browse--entry-choose-group ()
+(defun keemacs--entry-choose-group ()
   "Choose the entry's group by completion, replacing the `Group' line.
 Putting an entry in a group is a rare and error-prone edit, so the safe
 way is to complete over the groups that already exist rather than typing
 the path by hand (a typo would silently aim at a group that does not
-exist).  Bound to `C-c C-p' in `keepass-browse-entry-mode-map'; with
+exist).  Bound to `C-c C-p' in `keemacs-entry-mode-map'; with
 point in the entry buffer, this replaces the `Group:' line."
   (interactive)
-  (let ((group (keepass-browse--choose-group)))
+  (let ((group (keemacs--choose-group)))
     (goto-char (point-min))
     (if (re-search-forward "^Group: " nil t)
         (progn
@@ -1299,75 +1297,75 @@ point in the entry buffer, this replaces the `Group:' line."
           (insert group))
       (insert (format "Group: %s\n" group)))))
 
-(defun keepass-browse-edit (path)
+(defun keemacs-edit (path)
   "Edit the entry at PATH in an entry buffer.
 The Group line holds the entry's group (the folder it sits in); the
 Title line the entry's title.  Both come from the database rather than
 from PATH: a title containing \"/\" cannot be recovered by splitting the
 path (the last segment would silently rename the entry on commit).  The
-full path is tracked in `keepass-browse--entry-original', and the commit
+full path is tracked in `keemacs--entry-original', and the commit
 rebuilds the path from it, so editing does not become a spurious
 add/delete."
   (interactive "sEntry path: ")
   ;; The recorded parent group comes from an export; if this edit was not
   ;; reached through a browse listing, load once so it is available.
-  (unless (assoc path keepass-browse--entry-parents)
-    (keepass-browse--load-entries))
-  (let* ((entry (keepass-browse--entry-get path))
-         (title (or (keepass-browse--field entry "Title")
-                    (keepass-browse--entry-basename path)))
-         (group (keepass-browse--entry-group path)))
-    (keepass-browse--entry-open "*keepass-browse-edit*" "edit" path
+  (unless (assoc path keemacs--entry-parents)
+    (keemacs--load-entries))
+  (let* ((entry (keemacs--entry-get path))
+         (title (or (keemacs--field entry "Title")
+                    (keemacs--entry-basename path)))
+         (group (keemacs--entry-group path)))
+    (keemacs--entry-open "*keemacs-edit*" "edit" path
                                 (format "Group: %s\nTitle: %s\nUserName: %s\nPassword: %s\nURL: %s\nNotes: %s\n"
                                         group
                                         title
-                                        (keepass-browse--field entry "UserName")
-                                        (keepass-browse--field entry "Password")
-                                        (keepass-browse--field entry "URL")
-                                        (keepass-browse--field entry "Notes")))))
+                                        (keemacs--field entry "UserName")
+                                        (keemacs--field entry "Password")
+                                        (keemacs--field entry "URL")
+                                        (keemacs--field entry "Notes")))))
 
-(defun keepass-browse-clone (path)
+(defun keemacs-clone (path)
   "Clone the entry at PATH into an entry buffer."
   (interactive "sEntry path: ")
-  (unless (assoc path keepass-browse--entry-parents)
-    (keepass-browse--load-entries))
-  (let ((entry (keepass-browse--entry-get path)))
-    (keepass-browse--entry-open
-     "*keepass-browse-clone*" "add" nil
-     (concat (format "Group: %s\n" (keepass-browse--entry-group path))
+  (unless (assoc path keemacs--entry-parents)
+    (keemacs--load-entries))
+  (let ((entry (keemacs--entry-get path)))
+    (keemacs--entry-open
+     "*keemacs-clone*" "add" nil
+     (concat (format "Group: %s\n" (keemacs--entry-group path))
              (mapconcat (lambda (f)
-                          (format "%s: %s" f (keepass-browse--field entry f)))
+                          (format "%s: %s" f (keemacs--field entry f)))
                         '("Title" "UserName" "Password" "URL" "Notes")
                         "\n")))))
 
-(defun keepass-browse--delete-entry (path)
+(defun keemacs--delete-entry (path)
   "Delete the entry at PATH without confirmation."
   ;; Resolve a padded Embark target to a real path; clean paths (leading /)
   ;; are used as-is.
   (unless (string-prefix-p "/" (or path ""))
-    (setq path (keepass-browse--path-of path)))
-  (let ((run (apply #'keepass-browse--run
-                    (keepass-browse--db-password)
-                    (list "rm" "--quiet" (keepass-browse--database-path) path))))
+    (setq path (keemacs--path-of path)))
+  (let ((run (apply #'keemacs--run
+                    (keemacs--db-password)
+                    (list "rm" "--quiet" (keemacs--database-path) path))))
     (if (eq (cdr run) 0)
         (progn
           ;; If the deleted entry is displayed in the view buffer, close it --
           ;; its path no longer exists, so it could only show stale data.
-          (let ((view (get-buffer "*keepass-browse-view*")))
+          (let ((view (get-buffer "*keemacs-view*")))
             (when (and view
                        (with-current-buffer view
-                         (equal keepass-browse-view-path path)))
+                         (equal keemacs-view-path path)))
               (kill-buffer view)))
           (message "Deleted %s" path))
-      (keepass-browse--error (car run) (cdr run)))))
+      (keemacs-auth--error (car run) (keemacs--database-path) (cdr run)))))
 
-(defun keepass-browse-delete (path)
+(defun keemacs-delete (path)
   "Delete the entry at PATH, with confirmation."
   (interactive "sEntry path: ")
   (when (yes-or-no-p (format "Delete entry %s? " path))
-    (keepass-browse--delete-entry path)))
+    (keemacs--delete-entry path)))
 
-(defun keepass-browse--entry-commit ()
+(defun keemacs--entry-commit ()
   "Commit the add/clone/edit in the current entry buffer.
 A new entry (or a clone) uses `keepassxc-cli add'.  An edit edits the
 entry in place with `keepassxc-cli edit' (passing `-t' when the title
@@ -1376,22 +1374,22 @@ was changed to a different group, the entry is first moved there with
 `keepassxc-cli mv'.  Either way a rename or move never becomes a
 delete+add and never creates a Recycle-Bin duplicate."
   (interactive)
-  (let* ((entry (keepass-browse--parse-entry))
-         (action (buffer-local-value 'keepass-browse--entry-action (current-buffer)))
-         (original (buffer-local-value 'keepass-browse--entry-original (current-buffer)))
-         (title (string-trim (keepass-browse--field entry "Title")))
-         (password (keepass-browse--field entry "Password"))
-         (group (string-trim (keepass-browse--field entry "Group")))
+  (let* ((entry (keemacs--parse-entry))
+         (action (buffer-local-value 'keemacs--entry-action (current-buffer)))
+         (original (buffer-local-value 'keemacs--entry-original (current-buffer)))
+         (title (string-trim (keemacs--field entry "Title")))
+         (password (keemacs--field entry "Password"))
+         (group (string-trim (keemacs--field entry "Group")))
          (group (if (string-empty-p group)
                     ;; No Group given: keep the entry where it already is
                     ;; (edit), or root for a new entry.
-                    (if original (keepass-browse--entry-group original) "")
+                    (if original (keemacs--entry-group original) "")
                   (if (string-suffix-p "/" group) group (concat group "/"))))
          ;; Where the entry ends up after this commit.
          (new-path (if (string-prefix-p "/" title) title (concat group title))))
     (when (string-empty-p title)
       (user-error "Title may not be empty"))
-    (let* ((dbpw (keepass-browse--db-password))
+    (let* ((dbpw (keemacs--db-password))
            ;; keepassxc-cli reads the database password then (with -p) the
            ;; entry password from stdin.  For a passwordless DB there is no
            ;; database password line; --no-password tells keepassxc-cli so.
@@ -1399,58 +1397,58 @@ delete+add and never creates a Recycle-Bin duplicate."
                       (concat password "\n")
                     (concat dbpw "\n" password "\n")))
            ;; Global options come before the positional database argument.
-           (db (keepass-browse--database-path))
-           (global (append (keepass-auth-source--no-password-flag dbpw)
-                           (keepass-browse--db-keyfile)))
-           (common (append (list "-u" (keepass-browse--field entry "UserName")
-                                 "--url" (keepass-browse--field entry "URL")
-                                 "--notes" (keepass-browse--field entry "Notes")
+           (db (keemacs--database-path))
+           (global (append (keemacs-auth--no-password-flag dbpw)
+                           (keemacs--db-keyfile)))
+           (common (append (list "-u" (keemacs--field entry "UserName")
+                                 "--url" (keemacs--field entry "URL")
+                                 "--notes" (keemacs--field entry "Notes")
                                  "-p")))
            (run
             (cond
              ((string= action "edit")
-              (let* ((orig-group (keepass-browse--entry-group
+              (let* ((orig-group (keemacs--entry-group
                                   (or original "")))
                      (moved (not (string-equal orig-group group))))
                 (if (not moved)
                     ;; Same group: `edit -t' renames in place.
-                    (apply #'keepass-auth-source--keepassxc-run-stdin stdin
+                    (apply #'keemacs-auth--keepassxc-run-stdin stdin
                            (append (list "edit") global (list db original "-t" title) common))
                   ;; Different group: move first, then edit fields/title at the
                   ;; new site, so the entry is never deleted and re-added.
                   ;; The entry's title as it exists NOW cannot be derived
                   ;; from ORIGINAL when the title contains "/" -- fetch it.
                   (let* ((old-title (or (ignore-errors
-                                          (keepass-browse--field
-                                           (keepass-browse--entry-get original)
+                                          (keemacs--field
+                                           (keemacs--entry-get original)
                                            "Title"))
-                                        (keepass-browse--entry-basename original)))
+                                        (keemacs--entry-basename original)))
                          (tmp (concat group old-title))
-                         (mv (apply #'keepass-auth-source--keepassxc-run-stdin stdin
+                         (mv (apply #'keemacs-auth--keepassxc-run-stdin stdin
                                     (append (list "mv") global (list db original group)))))
                     (unless (eq (cdr mv) 0)
-                      (keepass-browse--error (car mv) (cdr mv)))
-                    (apply #'keepass-auth-source--keepassxc-run-stdin stdin
+                      (keemacs-auth--error (car mv) (keemacs--database-path) (cdr mv)))
+                    (apply #'keemacs-auth--keepassxc-run-stdin stdin
                            (append (list "edit") global (list db tmp "-t" title) common))))))
              (t ; add/clone: create under the chosen group.
-              (apply #'keepass-auth-source--keepassxc-run-stdin stdin
+              (apply #'keemacs-auth--keepassxc-run-stdin stdin
                      (append (list "add") global (list db new-path) common))))))
       (if (eq (cdr run) 0)
           (progn
             ;; Re-point and redraw the view buffer at the entry as it now
             ;; exists (a rename, a move, or a fresh clone).
-            (keepass-browse-view-refresh new-path)
+            (keemacs-view-refresh new-path)
             (kill-buffer (current-buffer))
             (message "keepassxc-cli %s entry \"%s\""
                      (if (string= action "edit") "edit" "add") title))
-        (keepass-browse--error (car run) (cdr run))))))
+        (keemacs-auth--error (car run) (keemacs--database-path) (cdr run))))))
 
 ;;; Embark integration
 
-(defvar keepass-browse--selecting nil
-  "Non-nil while `keepass-browse-select' is active.")
+(defvar keemacs--selecting nil
+  "Non-nil while `keemacs-select' is active.")
 
-(defun keepass-browse--path-from-minibuffer ()
+(defun keemacs--path-from-minibuffer ()
   "Return the entry path from the currently-selected minibuffer candidate.
 Reads the `kb-path' text property off the candidate vertico has selected
 (never the typed text), so the record identity comes straight from the data
@@ -1461,217 +1459,217 @@ structure rather than by parsing the display."
                               (nth vertico--index vertico--candidates)))
       (get-text-property 0 'kb-path (minibuffer-contents))))
 
-(defun keepass-browse--embark-target ()
+(defun keemacs--embark-target ()
   "Embark target for the entry under point or in the selection minibuffer.
 The target type depends on the context, so Embark shows the right menu:
-`keepass-browse-view' in the view buffer (whose menu omits the redundant
-view action), `keepass-browse' in the listing buffer, and
-`keepass-browse-select' in the selection minibuffer (whose menu adds the
+`keemacs-view' in the view buffer (whose menu omits the redundant
+view action), `keemacs' in the listing buffer, and
+`keemacs-select' in the selection minibuffer (whose menu adds the
 insert actions, which only make sense while the originating buffer's point
 is preserved)."
   (let (path type)
     (cond
      ;; In the listing buffer: the entry at point.
-     ((derived-mode-p 'keepass-browse-mode)
-      (setq type 'keepass-browse
+     ((derived-mode-p 'keemacs-mode)
+      (setq type 'keemacs
             path (get-text-property (point) 'kb-path)))
      ;; In the view buffer: the entry being viewed.
-     ((derived-mode-p 'keepass-browse-view-mode)
-      (setq type 'keepass-browse-view
-            path keepass-browse-view-path))
+     ((derived-mode-p 'keemacs-view-mode)
+      (setq type 'keemacs-view
+            path keemacs-view-path))
      ;; In the selection minibuffer: the current candidate.
-     ((and (active-minibuffer-window) keepass-browse--selecting)
-      (setq type 'keepass-browse-select
-            path (keepass-browse--path-from-minibuffer))))
+     ((and (active-minibuffer-window) keemacs--selecting)
+      (setq type 'keemacs-select
+            path (keemacs--path-from-minibuffer))))
     (when path (cons type path))))
 
-(add-to-list 'embark-target-finders #'keepass-browse--embark-target)
+(add-to-list 'embark-target-finders #'keemacs--embark-target)
 
-(defun keepass-browse--build-action-map (&optional excluded)
-  "Build an Embark action keymap from `keepass-browse--actions'.
+(defun keemacs--build-action-map (&optional excluded)
+  "Build an Embark action keymap from `keemacs--actions'.
 EXCLUDED is a list of keys (e.g. \"v\") to leave out.  define-key prepends,
 so the list is walked in reverse to make the menu *display* the actions in
 canonical field order; RET (the default action) is defined first so it
 displays last."
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'keepass-browse-run-default-action)
-    (dolist (entry (reverse keepass-browse--actions))
+    (define-key map (kbd "RET") #'keemacs-run-default-action)
+    (dolist (entry (reverse keemacs--actions))
       (pcase-let ((`(,key ,_label ,fn) entry))
         (unless (member key excluded)
           (define-key map (kbd key) fn))))
     map))
 
-(defconst keepass-browse-action-map
-  (keepass-browse--build-action-map)
-  "Embark actions for a keepass-browse entry target.
+(defconst keemacs-action-map
+  (keemacs--build-action-map)
+  "Embark actions for a keemacs entry target.
 Used in the listing buffer, where point is not in an editing context and
 the insert actions do not apply.  Copy actions are listed in the canonical
 field order: Title, UserName, Password, URL, Notes.")
 
-(defconst keepass-browse-view-action-map
-  (keepass-browse--build-action-map '("v"))
+(defconst keemacs-view-action-map
+  (keemacs--build-action-map '("v"))
   "Embark actions for the entry shown in the view buffer.
-Same as `keepass-browse-action-map' minus `v' (view): the view buffer
+Same as `keemacs-action-map' minus `v' (view): the view buffer
 already shows the entry, so re-viewing it is meaningless.")
 
-(defvar-keymap keepass-browse-select-action-map
-  :doc "Embark actions for a keepass-browse entry selected from the
+(defvar-keymap keemacs-select-action-map
+  :doc "Embark actions for a keemacs entry selected from the
 selection minibuffer.  Inherits the base actions and adds the insert
 actions, which make sense because the point of the originating buffer is
 preserved while the minibuffer is active."
-  :parent keepass-browse-action-map
-  "P" #'keepass-browse-insert-username
-  "U" #'keepass-browse-insert-password)
-;; The default Embark action for our target types is `keepass-browse-view'
+  :parent keemacs-action-map
+  "P" #'keemacs-insert-username
+  "U" #'keemacs-insert-password)
+;; The default Embark action for our target types is `keemacs-view'
 ;; (via the wrapper), not -- as Embark would otherwise fall back to for
 ;; minibuffer targets -- the command that opened the minibuffer
-;; (`keepass-browse' itself), which would run the selector recursively and
+;; (`keemacs' itself), which would run the selector recursively and
 ;; error.
 (mapc (lambda (type)
         (add-to-list 'embark-default-action-overrides
-                     (cons type #'keepass-browse-run-default-action)))
-      '(keepass-browse keepass-browse-view keepass-browse-select))
+                     (cons type #'keemacs-run-default-action)))
+      '(keemacs keemacs-view keemacs-select))
 
-(add-to-list 'embark-keymap-alist '(keepass-browse . keepass-browse-action-map))
+(add-to-list 'embark-keymap-alist '(keemacs . keemacs-action-map))
 (add-to-list 'embark-keymap-alist
-             '(keepass-browse-view . keepass-browse-view-action-map))
+             '(keemacs-view . keemacs-view-action-map))
 (add-to-list 'embark-keymap-alist
-             '(keepass-browse-select . keepass-browse-select-action-map))
+             '(keemacs-select . keemacs-select-action-map))
 
-(defun keepass-browse-run-default-action (path)
-  "Run `keepass-browse-default-action' on the entry at PATH.
+(defun keemacs-run-default-action (path)
+  "Run `keemacs-default-action' on the entry at PATH.
 A command wrapper so RET in the action map can invoke whatever function
-`keepass-browse-default-action' names."
+`keemacs-default-action' names."
   (interactive "sEntry path: ")
-  (funcall keepass-browse-default-action path))
+  (funcall keemacs-default-action path))
 
 ;;; Listing buffer
 
-(defvar keepass-browse-mode-map
+(defvar keemacs-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "C-.") #'embark-act)
-    (define-key map (kbd "g") #'keepass-browse-refresh)
+    (define-key map (kbd "g") #'keemacs-refresh)
     map)
-  "Keymap for `keepass-browse-mode'.")
+  "Keymap for `keemacs-mode'.")
 
-(define-derived-mode keepass-browse-mode special-mode "keepass-browse"
-  "Major mode for the keepass-browse listing buffer."
+(define-derived-mode keemacs-mode special-mode "keemacs"
+  "Major mode for the keemacs listing buffer."
   (setq buffer-read-only nil
         truncate-lines t
-        revert-buffer-function #'keepass-browse--revert))
+        revert-buffer-function #'keemacs--revert))
 
-(defun keepass-browse--revert (&rest _)
+(defun keemacs--revert (&rest _)
   "Refresh the listing buffer from the database."
-  (keepass-browse--insert-list))
+  (keemacs--insert-list))
 
-(defun keepass-browse--insert-list ()
+(defun keemacs--insert-list ()
   "Insert the current entries into the current buffer."
   (let ((inhibit-read-only t))
     (erase-buffer)
-    (dolist (candidate (keepass-browse--candidates))
+    (dolist (candidate (keemacs--candidates))
       (insert candidate "\n"))
     (goto-char (point-min))))
 
-(defun keepass-browse-refresh ()
+(defun keemacs-refresh ()
   "Reload the entry list from the database and redisplay."
   (interactive)
   (let ((buf (current-buffer)))
-    (keepass-browse--load-entries)
+    (keemacs--load-entries)
     (with-current-buffer buf
-      (keepass-browse--insert-list))))
+      (keemacs--insert-list))))
 
 ;;;###autoload
-(defun keepass-browse-buffer ()
+(defun keemacs-buffer ()
   "Open a columned listing buffer of all entries.
 Press `embark-act' (`C-.') on a row to reach the action menu."
   (interactive)
-  (keepass-browse--require-db)
-  (let ((buf (get-buffer-create "*keepass-browse*")))
+  (keemacs--require-db)
+  (let ((buf (get-buffer-create "*keemacs*")))
     (switch-to-buffer buf)
-    (unless (eq major-mode 'keepass-browse-mode)
-      (keepass-browse-mode))
-    (keepass-browse--insert-list)))
+    (unless (eq major-mode 'keemacs-mode)
+      (keemacs-mode))
+    (keemacs--insert-list)))
 
 ;;;###autoload
-(defun keepass-browse ()
+(defun keemacs ()
   "Select a KeePass entry via consult/vertico minibuffer completion.
-RET runs `keepass-browse-default-action' (by default `keepass-browse-view')
-on the selected entry; `C-.' opens `keepass-browse-action-map' for further
+RET runs `keemacs-default-action' (by default `keemacs-view')
+on the selected entry; `C-.' opens `keemacs-action-map' for further
 actions (copy username/password, edit, ...).  Returns the chosen path."
   (interactive)
-  (keepass-browse--require-db)
-  (keepass-browse--load-entries)
-  (let ((keepass-browse--selecting t))
-    (let* ((chosen (consult--read (keepass-browse--candidates)
+  (keemacs--require-db)
+  (keemacs--load-entries)
+  (let ((keemacs--selecting t))
+    (let* ((chosen (consult--read (keemacs--candidates)
                                   :prompt "KeePass entry: "
-                                  :history keepass-browse-history
-                                  :category 'keepass-browse
+                                  :history keemacs-history
+                                  :category 'keemacs
                                   :require-match t
                                   :sort nil
                                   :lookup #'consult--lookup-member)))
-      (let ((path (keepass-browse--path-of chosen)))
+      (let ((path (keemacs--path-of chosen)))
         (if (null path)
             (user-error "no path on candidate")
-          (when keepass-browse-default-action
-            (funcall keepass-browse-default-action path))
+          (when keemacs-default-action
+            (funcall keemacs-default-action path))
           path)))))
 
-(defun keepass-browse--group-choose (entries group)
+(defun keemacs--group-choose (entries group)
   "Drill down from GROUP, returning the chosen entry path or nil.
 ENTRIES is one database's ((PATH . FIELDS) ...) (already exported, so
 only a single keepassxc-cli call is made for the whole walk).  At each
 level the completion candidates are the current group's subgroups and
 entries; choosing a subgroup descends into it (recursively), choosing an
 entry returns its path.  Returns nil if a group turns out empty."
-  (let* ((contents (keepass-browse--group-contents entries group))
+  (let* ((contents (keemacs--group-contents entries group))
          (groups (car contents))
          (subentries (cdr contents)))
     (if (and (null groups) (null subentries))
         (progn (message "No entries under %s" group) nil)
-      (let* ((cands (append (mapcar #'keepass-browse--format-group groups)
+      (let* ((cands (append (mapcar #'keemacs--format-group groups)
                             (mapcar (lambda (e)
-                                      (keepass-browse--format-candidate
+                                      (keemacs--format-candidate
                                        (car e) (cdr e)))
                                     subentries)))
              (chosen (consult--read cands
                                     :prompt (format "KeePass (%s): " group)
-                                    :history keepass-browse-history
-                                    :category 'keepass-browse
+                                    :history keemacs-history
+                                    :category 'keemacs
                                     :require-match t
                                     :sort nil
                                     :lookup #'consult--lookup-member))
-             (path (keepass-browse--path-of chosen)))
+             (path (keemacs--path-of chosen)))
         (cond ((null path) (user-error "no path on candidate"))
               ;; A trailing slash marks a group: descend into it.
               ((string-suffix-p "/" path)
-               (keepass-browse--group-choose entries path))
+               (keemacs--group-choose entries path))
               (t path))))))
 
 ;;;###autoload
-(defun keepass-browse-group (&optional path)
+(defun keemacs-group (&optional path)
   "Select a KeePass entry by navigating its group hierarchy.
 Start from GROUP (default \"/\", the root) and complete over each
 group's children one level at a time -- subgroups and entries -- until
 an entry is chosen; choosing a subgroup descends into it.  When an entry
-is picked, `keepass-browse-default-action' (by default
-`keepass-browse-view') runs on it, exactly as with `keepass-browse'.
+is picked, `keemacs-default-action' (by default
+`keemacs-view') runs on it, exactly as with `keemacs'.
 Returns the chosen entry path."
   (interactive)
-  (keepass-browse--require-db)
-  (let ((keepass-browse--selecting t))
+  (keemacs--require-db)
+  (let ((keemacs--selecting t))
     (let* ((path (or path "/"))
-           (entries (keepass-browse--load-entries))
-           (result (keepass-browse--group-choose entries path)))
-      (when (and result keepass-browse-default-action)
-        (funcall keepass-browse-default-action result))
+           (entries (keemacs--load-entries))
+           (result (keemacs--group-choose entries path)))
+      (when (and result keemacs-default-action)
+        (funcall keemacs-default-action result))
       result)))
 
 ;;;; Favorites
 
-(defcustom keepass-browse-favorites-default nil
-  "Favorites offered by `keepass-browse-favorites' and
-`keepass-browse-favorites-embark'.
+(defcustom keemacs-favorites-default nil
+  "Favorites offered by `keemacs-favorites' and
+`keemacs-favorites-embark'.
 A list of favorite spec plists.  Each spec item describes one favorite:
 
   (:key   ?b                 ; key in the favorites menu
@@ -1689,15 +1687,15 @@ At least one of :title and :group must be given: items with neither are
 ignored with a message when the favorites are used.  :key must be a
 character (a one-character string works too) and unique across the
 spec; broken or duplicate items are ignored with a message.  :key is
-only used by `keepass-browse-favorites-embark'; `keepass-browse-favorites'
+only used by `keemacs-favorites-embark'; `keemacs-favorites'
 narrows by typing instead."
   :type '(repeat (plist :key-type (choice (const :key)
                                           (const :title)
                                           (const :group))
                         :value-type sexp))
-  :group 'keepass-browse)
+  :group 'keemacs)
 
-(defun keepass-browse-favorites--parse (favorites)
+(defun keemacs-favorites--parse (favorites)
   "Return the usable items of FAVORITES, a list of favorite spec plists.
 Each usable item becomes (KEY TITLE-REGEXP GROUP-REGEXP), either regexp
 and KEY possibly nil (the keyed menu assigns keys to nil-key items).
@@ -1715,24 +1713,24 @@ duplicate :key -- are dropped with a message, not an error."
         (cond
          ((not (and (or (null title) (stringp title))
                     (or (null group) (stringp group))))
-          (message "keepass-browse favorites: ignoring %S -- :title and :group should be strings"
+          (message "keemacs favorites: ignoring %S -- :title and :group should be strings"
                    favorite))
          ((and (or (null title) (string-empty-p title))
                (or (null group) (string-empty-p group)))
-          (message "keepass-browse favorites: ignoring %S -- give :title or :group"
+          (message "keemacs favorites: ignoring %S -- give :title or :group"
                    favorite))
          ((and key (memq key keys))
-          (message "keepass-browse favorites: ignoring %S -- key ?%c is already used"
+          (message "keemacs favorites: ignoring %S -- key ?%c is already used"
                    favorite key))
          (t
           (when key (push key keys))
           (push (list key title group) items)))))
     (nreverse items)))
 
-(defun keepass-browse-favorites--match (spec entries)
+(defun keemacs-favorites--match (spec entries)
   "Return the entries in ENTRIES matching any item of SPEC.
 SPEC is a list of (KEY TITLE-REGEXP GROUP-REGEXP) items as returned by
-`keepass-browse-favorites--parse'.  An item matches an entry when every
+`keemacs-favorites--parse'.  An item matches an entry when every
 regexp it carries matches -- TITLE-REGEXP against the entry's Title,
 GROUP-REGEXP against its full group path with trailing slash.  The
 result is deduplicated on (group . title), the entry's identity: two
@@ -1755,7 +1753,7 @@ once."
                 (push entry matches)))))))
     (nreverse matches)))
 
-(defun keepass-browse-favorites--choice (item)
+(defun keemacs-favorites--choice (item)
   "Return the `read-multiple-choice' menu entry for favorite ITEM.
 The name is the item's title when given, else its group; the
 description is the group, when the title was used as the name."
@@ -1764,127 +1762,127 @@ description is the group, when the title was used as the name."
         (list key title group)
       (list key group))))
 
-(defconst keepass-browse-favorites--key-pool
+(defconst keemacs-favorites--key-pool
   (append (string-to-list "123456789")
           (string-to-list "abcdefghijklmnopqrstuvwxyz")
           (string-to-list "ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
   "Characters that may be hotkeys in a favorites menu.")
 
-(defun keepass-browse-favorites--key-for (label used)
+(defun keemacs-favorites--key-for (label used)
   "Return an unassigned key for the menu entry labelled LABEL.
 USED is the list of characters already taken.  Two phases: the first
 unused character of LABEL itself that is a regular set character --
 digit, lowercase or uppercase letter; never punctuation -- falling back
-to the first unused character of `keepass-browse-favorites--key-pool'
+to the first unused character of `keemacs-favorites--key-pool'
 (a mnemonic -- \"github\" offers ?g when free; \"@Mail\" skips ?@ and
 offers ?M)."
   (or (seq-find (lambda (c)
                   (and (not (memq c used))
-                       (memq c keepass-browse-favorites--key-pool)))
+                       (memq c keemacs-favorites--key-pool)))
                 (string-to-list label))
       (seq-find (lambda (c) (not (memq c used)))
-                keepass-browse-favorites--key-pool)
+                keemacs-favorites--key-pool)
       (user-error "No unused keys left for the favorites menu -- set :key on some items")))
 
-(defun keepass-browse-favorites--assign-keys (spec)
+(defun keemacs-favorites--assign-keys (spec)
   "Return SPEC with a key on every item.
 Items with a :key keep it.  A keyless item's key comes from
-`keepass-browse-favorites--key-for', given its label -- the title when
+`keemacs-favorites--key-for', given its label -- the title when
 the item has one, else its group -- and the keys taken so far."
   (let ((used (delq nil (mapcar (lambda (i) (nth 0 i)) spec))))
     (mapcar (lambda (item)
               (if (nth 0 item)
                   item
-                (let ((key (keepass-browse-favorites--key-for
+                (let ((key (keemacs-favorites--key-for
                             (or (nth 1 item) (nth 2 item)) used)))
                   (push key used)
                   (append (list key) (cdr item)))))
             spec)))
 
 ;;;###autoload
-(defun keepass-browse-favorites (&optional favorites)
+(defun keemacs-favorites (&optional favorites)
   "Select among the entries matching FAVORITES.
 FAVORITES is a favorites spec -- a list of plists as documented in
-`keepass-browse-favorites-default' -- and defaults to it.  Every entry
+`keemacs-favorites-default' -- and defaults to it.  Every entry
 matching any spec item is offered in a completion list; RET runs
-`keepass-browse-default-action' and \\[embark-act] opens the usual
+`keemacs-default-action' and \\[embark-act] opens the usual
 embark action menu.  The spec's :key is not used by this command.  Each
 entry is offered once, even when several spec items match it.  Returns
 the chosen entry path."
   (interactive)
-  (keepass-browse--require-db)
-  (let* ((spec (keepass-browse-favorites--parse
-                (or favorites keepass-browse-favorites-default)))
-         (entries (and spec (keepass-browse--load-entries)))
+  (keemacs--require-db)
+  (let* ((spec (keemacs-favorites--parse
+                (or favorites keemacs-favorites-default)))
+         (entries (and spec (keemacs--load-entries)))
          (matches (and spec entries
-                       (keepass-browse-favorites--match spec entries))))
+                       (keemacs-favorites--match spec entries))))
     (when (null spec)
-      (user-error "No usable favorites in `keepass-browse-favorites-default'"))
+      (user-error "No usable favorites in `keemacs-favorites-default'"))
     (when (null matches)
       (user-error "No entries match any of the favorites"))
-    (let ((keepass-browse--selecting t))
+    (let ((keemacs--selecting t))
       (let* ((chosen (consult--read
                       (mapcar (lambda (e)
-                                (keepass-browse--format-candidate
+                                (keemacs--format-candidate
                                  (car e) (cdr e)))
                               matches)
                       :prompt "KeePass favorite: "
-                      :history keepass-browse-history
-                      :category 'keepass-browse
+                      :history keemacs-history
+                      :category 'keemacs
                       :require-match t
                       :sort nil
                       :lookup #'consult--lookup-member))
-             (path (keepass-browse--path-of chosen)))
+             (path (keemacs--path-of chosen)))
         (if (null path)
             (user-error "no path on candidate")
-          (when keepass-browse-default-action
-            (funcall keepass-browse-default-action path))
+          (when keemacs-default-action
+            (funcall keemacs-default-action path))
           path)))))
 
 ;;;###autoload
-(defun keepass-browse-favorites--embark-entry (entry)
+(defun keemacs-favorites--embark-entry (entry)
   "Open the embark action menu for matched ENTRY (PATH . FIELDS).
 The embark target is the entry's real path with the select action map --
 copy, view, edit and the insert-at-point actions."
   (let ((path (car entry)))
     (let ((embark-target-finders
            (cons (lambda ()
-                   (cons 'keepass-browse-select path))
+                   (cons 'keemacs-select path))
                  embark-target-finders)))
       (embark-act))))
 
-(defun keepass-browse-favorites-embark (&optional favorites)
+(defun keemacs-favorites-embark (&optional favorites)
   "Choose a favorite from FAVORITES and act on what it matches.
 FAVORITES is a favorites spec -- a list of plists as documented in
-`keepass-browse-favorites-default' -- and defaults to it.  The
+`keemacs-favorites-default' -- and defaults to it.  The
 favorites are offered as a keyed menu (key, title or group, group);
 picking one searches the database for the entries it matches.  A single
 match goes straight to the embark action menu on that entry (view,
 copy, insert, ...); several matches are offered in a keyed menu of
 their own first, then the chosen entry goes to the same action menu."
   (interactive)
-  (keepass-browse--require-db)
-  (let* ((spec (keepass-browse-favorites--assign-keys
-                (keepass-browse-favorites--parse
-                 (or favorites keepass-browse-favorites-default))))
-         (entries (and spec (keepass-browse--load-entries))))
+  (keemacs--require-db)
+  (let* ((spec (keemacs-favorites--assign-keys
+                (keemacs-favorites--parse
+                 (or favorites keemacs-favorites-default))))
+         (entries (and spec (keemacs--load-entries))))
     (when (null spec)
-      (user-error "No usable favorites in `keepass-browse-favorites-default'"))
-    (let* ((choices (mapcar #'keepass-browse-favorites--choice spec))
+      (user-error "No usable favorites in `keemacs-favorites-default'"))
+    (let* ((choices (mapcar #'keemacs-favorites--choice spec))
            (chosen (read-multiple-choice "Favorite: " choices))
            (item (seq-find (lambda (i) (eq (nth 0 i) (car chosen))) spec))
-           (matches (keepass-browse-favorites--match (list item) entries))
+           (matches (keemacs-favorites--match (list item) entries))
            (label (or (nth 1 item) (nth 2 item))))
       (pcase (length matches)
         (0 (user-error "No entries match the favorite %s" label))
-        (1 (keepass-browse-favorites--embark-entry (car matches)))
+        (1 (keemacs-favorites--embark-entry (car matches)))
         (_ (let* ((pseudo (mapcar (lambda (e)
                                     (list nil
-                                          (keepass-browse--field (cdr e) "Title")
-                                          (keepass-browse--field (cdr e) "Group")))
+                                          (keemacs--field (cdr e) "Title")
+                                          (keemacs--field (cdr e) "Group")))
                                   matches))
-                   (keyed (keepass-browse-favorites--assign-keys pseudo))
-                   (choices (mapcar #'keepass-browse-favorites--choice keyed))
+                   (keyed (keemacs-favorites--assign-keys pseudo))
+                   (choices (mapcar #'keemacs-favorites--choice keyed))
                    (chosen (read-multiple-choice "Matching entries: " choices))
                    (picked (seq-find (lambda (i) (eq (nth 0 i) (car chosen)))
                                      keyed))
@@ -1892,86 +1890,86 @@ their own first, then the chosen entry goes to the same action menu."
                    (pick-group (nth 2 picked))
                    (entry (seq-find
                            (lambda (e)
-                             (and (string= (keepass-browse--field (cdr e) "Title")
+                             (and (string= (keemacs--field (cdr e) "Title")
                                            pick-title)
-                                  (string= (keepass-browse--field (cdr e) "Group")
+                                  (string= (keemacs--field (cdr e) "Group")
                                            pick-group)))
                            matches)))
               (if (null entry)
                   (user-error "no path on candidate")
-                (keepass-browse-favorites--embark-entry entry))))))))
+                (keemacs-favorites--embark-entry entry))))))))
 
-(defun keepass-browse--check-databases ()
-  "Signal a clear error if `keepass-browse-databases' has the wrong shape.
-Each element must be a database spec plist (see `keepass-db-spec-p')."
-  (unless (listp keepass-browse-databases)
-    (user-error "`keepass-browse-databases' must be a list of database spec \
-plists, got %S" keepass-browse-databases))
-  (dolist (entry keepass-browse-databases)
-    (unless (keepass-db-spec-p entry)
-      (user-error "Each element of `keepass-browse-databases' must be a \
+(defun keemacs--check-databases ()
+  "Signal a clear error if `keemacs-databases' has the wrong shape.
+Each element must be a database spec plist (see `keemacs-auth-db-spec-p')."
+  (unless (listp keemacs-databases)
+    (user-error "`keemacs-databases' must be a list of database spec \
+plists, got %S" keemacs-databases))
+  (dolist (entry keemacs-databases)
+    (unless (keemacs-auth-db-spec-p entry)
+      (user-error "Each element of `keemacs-databases' must be a \
 database spec plist such as (:file \"...\") ; got %S" entry))))
 
-(defun keepass-browse--ensure-database ()
+(defun keemacs--ensure-database ()
   "Make sure a database is selected.
-If `keepass-browse-database' is already set, leave it.  Otherwise, if
-`keepass-browse-databases' has exactly one entry, select it automatically;
+If `keemacs-database' is already set, leave it.  Otherwise, if
+`keemacs-databases' has exactly one entry, select it automatically;
 if it has several and the user has not picked one yet, prompt them with
-`keepass-browse-select-database'."
-  (keepass-browse--check-databases)
-  (unless keepass-browse-database
-    (if (= 1 (length keepass-browse-databases))
-        (setq keepass-browse-database (car keepass-browse-databases))
-      (keepass-browse-select-database)))
-  keepass-browse-database)
+`keemacs-select-database'."
+  (keemacs--check-databases)
+  (unless keemacs-database
+    (if (= 1 (length keemacs-databases))
+        (setq keemacs-database (car keemacs-databases))
+      (keemacs-select-database)))
+  keemacs-database)
 
 ;;;###autoload
-(defun keepass-browse-select-database ()
-  "Select the active KeePass database from `keepass-browse-databases'.
+(defun keemacs-select-database ()
+  "Select the active KeePass database from `keemacs-databases'.
 Completes over each entry's label (its `:name', or the file name)."
   (interactive)
-  (keepass-browse--check-databases)
-  (unless keepass-browse-databases
-    (user-error "`keepass-browse-databases' is empty -- add your databases first"))
-  (let* ((entries keepass-browse-databases)
-         (labels (mapcar #'keepass-browse--spec-label entries))
+  (keemacs--check-databases)
+  (unless keemacs-databases
+    (user-error "`keemacs-databases' is empty -- add your databases first"))
+  (let* ((entries keemacs-databases)
+         (labels (mapcar #'keemacs--spec-label entries))
          (chosen (completing-read "KeePass database: " labels nil t))
          (entry (car (seq-filter (lambda (e)
-                                   (string= chosen (keepass-browse--spec-label e)))
+                                   (string= chosen (keemacs--spec-label e)))
                                  entries))))
-    (setq keepass-browse-database entry)
+    (setq keemacs-database entry)
     (message "Using KeePass database %s" chosen)
-    keepass-browse-database))
+    keemacs-database))
 
 ;;;; Command keymap
 ;;
 ;; One sparse keymap so users can bind every keepass command with a single
 ;; line in their init:
 ;;
-;;   (keymap-global-set "C-:" 'keepass-browse-command-map)
+;;   (keymap-global-set "C-:" 'keemacs-command-map)
 ;;
-;; `define-prefix-command' defines `keepass-browse-command-map' both as the
+;; `define-prefix-command' defines `keemacs-command-map' both as the
 ;; keymap variable and as a prefix command, and the autoload cookie makes
 ;; the binding work even before this file is loaded.
 
-;;;###autoload (define-prefix-command 'keepass-browse-command-map)
-(defvar keepass-browse-command-map)
+;;;###autoload (define-prefix-command 'keemacs-command-map)
+(defvar keemacs-command-map)
 
 ;; Creating it here as well as in the autoloads makes the map work both for
 ;; a package install and for a plain load-path `require' in init.
-(define-prefix-command 'keepass-browse-command-map)
+(define-prefix-command 'keemacs-command-map)
 
-(define-key keepass-browse-command-map (kbd "t") #'keepass-browse)
-(define-key keepass-browse-command-map (kbd "g") #'keepass-browse-group)
-(define-key keepass-browse-command-map (kbd "d") #'keepass-browse-select-database)
-(define-key keepass-browse-command-map (kbd "f") #'keepass-browse-favorites)
-(define-key keepass-browse-command-map (kbd "k") #'keepass-browse-favorites-embark)
+(define-key keemacs-command-map (kbd "t") #'keemacs)
+(define-key keemacs-command-map (kbd "g") #'keemacs-group)
+(define-key keemacs-command-map (kbd "d") #'keemacs-select-database)
+(define-key keemacs-command-map (kbd "f") #'keemacs-favorites)
+(define-key keemacs-command-map (kbd "k") #'keemacs-favorites-embark)
 ;; `f' was taken by the favorites; `c' clears the cached master password.
-(define-key keepass-browse-command-map (kbd "c") #'keepass-auth-source-forget-cached)
-(define-key keepass-browse-command-map (kbd "a") #'keepass-browse-add)
+(define-key keemacs-command-map (kbd "c") #'keemacs-auth-forget-cached)
+(define-key keemacs-command-map (kbd "a") #'keemacs-add)
 ;; Group maintenance: uppercase, the entry-level sibling is lowercase.
-(define-key keepass-browse-command-map (kbd "A") #'keepass-browse-add-group)
-(define-key keepass-browse-command-map (kbd "D") #'keepass-browse-delete-group)
+(define-key keemacs-command-map (kbd "A") #'keemacs-add-group)
+(define-key keemacs-command-map (kbd "D") #'keemacs-delete-group)
 
-(provide 'keepass-browse)
-;;; keepass-browse.el ends here
+(provide 'keemacs)
+;;; keemacs.el ends here
