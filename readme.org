@@ -435,6 +435,7 @@ The default bindings under the prefix (=C-:= here, any prefix you like):
 | =f=   | =keepass-browse-favorites=          |
 | =k=   | =keepass-browse-favorites-embark=   |
 | =c=   | =keepass-auth-source-forget-cached= |
+| =a=   | =keepass-browse-add=                |
 
 On Emacs versions without =keymap-global-set= (pre-29), the classic
 spelling is:
@@ -506,8 +507,12 @@ commands and take effect directly in the database:
   #+END_SRC
   =generate= takes =--length=; the diceware =passphrase= takes
   =--words=.  Add, remove or reorder entries to taste.
-- *add* and *clone* create a new entry under the Group shown at the top of
-  the buffer;
+- *add* -- called directly (=M-x keepass-browse-add= or =C-: a=), it asks
+  which group to create the entry in (completion over existing groups;
+  =RET= alone picks the root, creating a top-level entry), then opens the
+  entry buffer.  Called as an Embark action on a selected entry (=a= in
+  the action menu), it skips the question and adds to that entry's
+  group;
 - *delete* asks for confirmation and moves the entry to the Recycle Bin
   (the browse buffer excludes the Recycle Bin, so the entry disappears
   from the listing).

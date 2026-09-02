@@ -427,7 +427,8 @@ its `--no-password' option instead of reading stdin."
     (keepass-auth-source--log "keepassxc-cli %s"
                               (mapconcat #'identity args " ")))
   (let* ((prog (keepass-auth-source--keepassxc-executable))
-         (out-buf (generate-new-buffer " *keepass-auth-source-out*")))
+         (out-buf (generate-new-buffer " *keepass-auth-source-out*"))
+         (err-file (make-temp-file "keepass-auth-source-err")))
     (unwind-protect
         (with-temp-buffer
           ;; Feed PASSWORD (plus a terminating newline, as interactive
@@ -437,10 +438,20 @@ its `--no-password' option instead of reading stdin."
             (insert (or password "") "\n"))
           (let ((exit (apply #'call-process-region
                              (point-min) (point-max)
-                             prog t (list out-buf) nil
+                             prog t (list out-buf err-file) nil
                              args)))
-            ;; Output was appended into OUT-BUF; return it with the exit code.
-            (cons (with-current-buffer out-buf (buffer-string)) exit)))
+            ;; Output was appended into OUT-BUF and stderr into ERR-FILE;
+            ;; return them merged with the exit code.  stderr carries the
+            ;; error messages -- notably the ones --quiet suppresses on
+            ;; stdout, and everything on a wrong master password.
+            (cons (concat (with-current-buffer out-buf (buffer-string))
+                          (condition-case nil
+                              (with-temp-buffer
+                                (insert-file-contents err-file)
+                                (buffer-string))
+                            (error nil)))
+                  exit)))
+      (ignore-errors (delete-file err-file))
       (kill-buffer out-buf))))
 
 (defun keepass-auth-source--keepassxc-run-stdin (stdin &rest args)
@@ -463,15 +474,25 @@ the new entry's password).  Returns (OUTPUT . EXIT)."
             (cons (with-current-buffer out-buf (buffer-string)) exit)))
       (kill-buffer out-buf))))
 
-(defun keepass-auth-source--error (output &optional db)
+(defun keepass-auth-source--error (output &optional db exit-code)
   "Signal an error describing a failed keepassxc-cli run (OUTPUT).
 DB, when given, is the database whose cached master password should be
-dropped when the credentials were wrong."
+dropped when the credentials were wrong; EXIT-CODE is the run's exit
+status, which distinguishes an empty-output unlock failure from other
+failures."
   (let ((msg (string-trim output)))
     (cond
      ((string-match-p "Invalid credentials were provided" msg)
       (when db (password-cache-remove db))
       (user-error "Incorrect master password"))
+     ;; --quiet makes keepassxc-cli print nothing at all on a failed
+     ;; unlock -- no prompt, no error -- so empty output with a nonzero
+     ;; exit is a wrong master password (or an unreadable database) in
+     ;; practice.  Treat it as such: the stale cached password is evicted,
+     ;; so the next lookup re-prompts instead of looping forever.
+     ((and db (/= 0 exit-code) (string-empty-p msg))
+      (when db (password-cache-remove db))
+      (user-error "Could not unlock the database (wrong master password?) -- the cached password was cleared, try again"))
      (t (user-error "keepassxc-cli failed: %s"
                     (if (> (length msg) 0) msg "unknown error"))))))
 

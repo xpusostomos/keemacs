@@ -508,9 +508,50 @@ on commit) and invent a phantom group."
                   ("d" keepass-browse-select-database)
                   ("f" keepass-browse-favorites)
                   ("k" keepass-browse-favorites-embark)
-                  ("c" keepass-auth-source-forget-cached)))
+                  ("c" keepass-auth-source-forget-cached)
+                  ("a" keepass-browse-add)))
     (let ((resolved (lookup-key keepass-browse-command-map (kbd (car bind)))))
       (should (eq resolved (cadr bind))))))
+
+(ert-deftest keepass-browse-command-map-group-keys ()
+  "The command keymap binds the group-maintenance commands."
+  (should (eq (lookup-key keepass-browse-command-map (kbd "A"))
+              #'keepass-browse-add-group))
+  (should (eq (lookup-key keepass-browse-command-map (kbd "D"))
+              #'keepass-browse-delete-group)))
+
+(ert-deftest keepass-browse-add-group-name-validation ()
+  "add-group rejects empty names and names containing a slash."
+  (let ((db (keepass-browse-test-make-db))
+        (keepass-browse-database nil)
+        (keepass-browse-cache-expiry nil)
+        (password-cache-expiry nil))
+    (unwind-protect
+        (progn
+          (setq keepass-browse-database (keepass-make-db-spec :file db))
+          (password-cache-add db "PASS")
+          ;; The name is prompted; "/" in it is rejected before any run.
+          (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "bad/name")))
+            (should-error (keepass-browse-add-group "/Work/")
+                          :type 'user-error))
+          (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+            (should-error (keepass-browse-add-group "/Work/")
+                          :type 'user-error))
+          ;; Nothing was created by the failed attempts.
+          (let ((paths (keepass-browse--group-paths)))
+            (should-not (member "/Work/bad" paths))
+            (should-not (member "/Work/bad/name" paths))))
+      (delete-file db))))
+
+(ert-deftest keepass-browse-choose-group-offers-root ()
+  "The group chooser offers the root / and defaults to it."
+  (cl-letf (((symbol-function 'keepass-browse--group-paths)
+             (lambda () '("/Bank/" "/Work/")))
+            ((symbol-function 'completing-read)
+             (lambda (_prompt coll &rest _)
+               (should (member "/" coll))
+               (car coll))))  ; RET: the default, root
+    (should (equal "/" (keepass-browse--choose-group)))))
 
 (ert-deftest keepass-browse-favorites-parse ()
   "`favorites--parse' keeps usable items and drops broken ones with a

@@ -315,9 +315,10 @@ resolved master password (possibly `:no-password')."
          (keepass-browse--db-yubi)
          args))
 
-(defun keepass-browse--error (output)
-  "Signal an error describing a failed keepassxc-cli run (OUTPUT)."
-  (keepass-auth-source--error output (keepass-browse--database-path)))
+(defun keepass-browse--error (output &optional exit-code)
+  "Signal an error describing a failed keepassxc-cli run (OUTPUT).
+EXIT-CODE is the run's exit status; see `keepass-auth-source--error'."
+  (keepass-auth-source--error output (keepass-browse--database-path) exit-code))
 
 (defun keepass-browse--require-db ()
   "Signal an error unless a database is configured.
@@ -355,7 +356,7 @@ always seen."
                      (list "show" "--quiet" "--show-protected" db path))))
     (if (eq (cdr run) 0)
         (keepass-browse--parse-show (car run))
-      (keepass-browse--error (car run)))))
+      (keepass-browse--error (car run) (cdr run)))))
 
 (defun keepass-browse--field (entry field)
   "Return the value of FIELD in parsed alist ENTRY, or \"\"."
@@ -369,7 +370,7 @@ Reads freshly from keepassxc-cli, with no caching."
                      (keepass-browse--db-password)
                      (list "ls" "--quiet" "--recursive" "--flatten" db))))
     (unless (eq (cdr run) 0)
-      (keepass-browse--error (car run)))
+      (keepass-browse--error (car run) (cdr run)))
     (let ((paths (seq-filter (lambda (s)
                                (and (not (string-blank-p s))
                                     (not (string-suffix-p "/" s))))
@@ -385,7 +386,7 @@ Reads freshly from keepassxc-cli, with no caching."
                      (keepass-browse--db-password)
                      (list "ls" "--quiet" "--recursive" "--flatten" db))))
     (unless (eq (cdr run) 0)
-      (keepass-browse--error (car run)))
+      (keepass-browse--error (car run) (cdr run)))
     (mapcar (lambda (g) (if (string-prefix-p "/" g) g (concat "/" g)))
             (seq-filter (lambda (s) (string-suffix-p "/" s))
                         (split-string (car run) "\n" t)))))
@@ -398,7 +399,7 @@ all fields, passwords included) is fetched up front, freshly each time."
                     (keepass-browse--db-password)
                     (list "export" "--quiet" (keepass-browse--database-path)))))
     (unless (eq (cdr run) 0)
-      (keepass-browse--error (car run)))
+      (keepass-browse--error (car run) (cdr run)))
     (with-temp-buffer
       (insert (car run))
       (goto-char (point-min))
@@ -1202,13 +1203,14 @@ group path ending in \"/\" -- shown above Title."
 ;;; Add / edit / clone / delete
 
 (defun keepass-browse-add (&optional target)
-  "Add a new entry.
+  "Add a new entry, in group TARGET's group or a chosen one.
 When invoked as an Embark action, TARGET is the selected entry's path and
 the new entry is created in the same group as that entry.  When called
-directly, the group is chosen by completion.  Fill in the Title (after the
-group prefix) and the other fields, then commit with
-`keepass-browse--entry-commit'."
-  (interactive "sEntry path: ")
+directly (M-x or from the command keymap), the group is chosen by
+completion -- there is no entry-path prompt.  Fill in the Title and the
+other fields in the buffer that opens, then commit with
+`keepass-browse--entry-commit' (C-c C-c)."
+  (interactive)
   (keepass-browse--require-db)
   (let* ((group (if (and target (not (string-blank-p target)))
                     ;; Same group as the selected entry; pure string ops
@@ -1220,9 +1222,66 @@ group prefix) and the other fields, then commit with
                                 (format "Group: %s\nTitle: \nUserName: \nPassword: \nURL: \nNotes: \n" group))))
 
 (defun keepass-browse--choose-group ()
-  "Choose a KeePass group path by completion (ends in /)."
-  (let ((groups (keepass-browse--group-paths)))
-    (completing-read "Group: " groups nil nil nil)))
+  "Choose a KeePass group path by completion (ends in /).
+The root group \"/\" is always offered, and is the default -- RET alone
+puts the new entry at the top level of the database."
+  (let ((groups (cons "/" (keepass-browse--group-paths))))
+    (completing-read "Group (RET for root): " groups nil nil nil nil "/")))
+
+;;; Group maintenance
+
+(defun keepass-browse--run-group-cmd (subcommand group)
+  "Run keepassxc-cli SUBCOMMAND (mkdir or rmdir) on GROUP.
+Signals an error on failure."
+  (let ((run (apply #'keepass-browse--run
+                    (keepass-browse--db-password)
+                    (list subcommand "--quiet"
+                          (keepass-browse--database-path) group))))
+    (unless (eq (cdr run) 0)
+      (keepass-browse--error (car run) (cdr run)))))
+
+(defun keepass-browse-add-group (&optional parent)
+  "Create a new group inside group PARENT.
+When called as a command (M-x or the command keymap), PARENT is chosen
+by completion over the existing groups, the root \"/\" being the
+default; then the new group's name is prompted for.  When invoked from
+ Lisp, PARENT may be a group path (\"/\" or ending in \"/\")."
+  (interactive)
+  (keepass-browse--require-db)
+  (let* ((parent (or parent (keepass-browse--choose-group)))
+         (name (read-string (format "New group under %s: " parent))))
+    (when (string-blank-p name)
+      (user-error "Group name may not be empty"))
+    (when (string-match-p "/" name)
+      (user-error "Group name may not contain \"/\" -- it is created under the chosen group"))
+    (let ((path (concat (if (string-suffix-p "/" parent)
+                            (substring parent 0 -1)
+                          parent)
+                        "/" name)))
+      (keepass-browse--run-group-cmd "mkdir" path)
+      (message "Created group %s" path))))
+
+(defun keepass-browse-delete-group (&optional group)
+  "Delete the KeePass group GROUP.
+GROUP is chosen by completion (the root \"/\" cannot be deleted).
+keepassxc-cli recycles the group: the whole subtree, entries included,
+moves to the Recycle Bin and can be restored from the GUI."
+  (interactive)
+  (keepass-browse--require-db)
+  (let* ((group (or group
+                    ;; Offer only real groups for deletion -- the root
+                    ;; cannot be deleted.
+                    (completing-read "Delete group: "
+                                     (keepass-browse--group-paths)
+                                     nil t)))
+         (group (directory-file-name group)))
+    (when (string-empty-p group)
+      (user-error "Cannot delete the root group"))
+    (when (string-prefix-p "/Recycle Bin" group)
+      (user-error "Cannot delete the Recycle Bin"))
+    (when (yes-or-no-p (format "Delete group %s and everything in it (entries go to the Recycle Bin)? " group))
+      (keepass-browse--run-group-cmd "rmdir" group)
+      (message "Deleted group %s (recycled)" group))))
 
 (defun keepass-browse--entry-choose-group ()
   "Choose the entry's group by completion, replacing the `Group' line.
@@ -1300,7 +1359,7 @@ add/delete."
                          (equal keepass-browse-view-path path)))
               (kill-buffer view)))
           (message "Deleted %s" path))
-      (keepass-browse--error (car run)))))
+      (keepass-browse--error (car run) (cdr run)))))
 
 (defun keepass-browse-delete (path)
   "Delete the entry at PATH, with confirmation."
@@ -1370,7 +1429,7 @@ delete+add and never creates a Recycle-Bin duplicate."
                          (mv (apply #'keepass-auth-source--keepassxc-run-stdin stdin
                                     (append (list "mv") global (list db original group)))))
                     (unless (eq (cdr mv) 0)
-                      (keepass-browse--error (car mv)))
+                      (keepass-browse--error (car mv) (cdr mv)))
                     (apply #'keepass-auth-source--keepassxc-run-stdin stdin
                            (append (list "edit") global (list db tmp "-t" title) common))))))
              (t ; add/clone: create under the chosen group.
@@ -1384,7 +1443,7 @@ delete+add and never creates a Recycle-Bin duplicate."
             (kill-buffer (current-buffer))
             (message "keepassxc-cli %s entry \"%s\""
                      (if (string= action "edit") "edit" "add") title))
-        (keepass-browse--error (car run))))))
+        (keepass-browse--error (car run) (cdr run))))))
 
 ;;; Embark integration
 
@@ -1909,6 +1968,10 @@ Completes over each entry's label (its `:name', or the file name)."
 (define-key keepass-browse-command-map (kbd "k") #'keepass-browse-favorites-embark)
 ;; `f' was taken by the favorites; `c' clears the cached master password.
 (define-key keepass-browse-command-map (kbd "c") #'keepass-auth-source-forget-cached)
+(define-key keepass-browse-command-map (kbd "a") #'keepass-browse-add)
+;; Group maintenance: uppercase, the entry-level sibling is lowercase.
+(define-key keepass-browse-command-map (kbd "A") #'keepass-browse-add-group)
+(define-key keepass-browse-command-map (kbd "D") #'keepass-browse-delete-group)
 
 (provide 'keepass-browse)
 ;;; keepass-browse.el ends here
