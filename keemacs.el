@@ -125,6 +125,14 @@ Raise this to see more of long values -- titles containing \"/\"
   :type 'integer
   :group 'keemacs)
 
+(defcustom keemacs-title-width 34
+  "Width of the Title column in candidate lines.
+The Title is the first column of `keemacs-fields'; this overrides
+`keemacs-field-width' for it alone (34 by default, 10 more than the
+other columns, so long titles are easier to tell apart)."
+  :type 'integer
+  :group 'keemacs)
+
 (defcustom keemacs-clear-clipboard-seconds 0
   "If non-zero, clear the clipboard this many seconds after a copy."
   :type 'integer
@@ -760,10 +768,17 @@ has one, else a unicode glyph approximating its standard icon (see
   (let* ((prefix (keemacs--candidate-prefix path entry))
          (str (concat prefix
                       (when (not (string-empty-p prefix)) " ")
+                      ;; The Title (the first column) gets its own width,
+                      ;; `keemacs-title-width', so long titles have room;
+                      ;; the other columns use `keemacs-field-width'.
                       (mapconcat
                        (lambda (f)
-                         (truncate-string-to-width (keemacs--field entry f)
-                                                   keemacs-field-width 0 ?\s))
+                         (truncate-string-to-width
+                          (keemacs--field entry f)
+                          (if (equal f "Title")
+                              keemacs-title-width
+                            keemacs-field-width)
+                          0 ?\s))
                        keemacs-fields "\t"))))
     (put-text-property 0 (length str) 'kb-path path str)
     str))

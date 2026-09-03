@@ -543,6 +543,19 @@ on commit) and invent a phantom group."
             (should-not (member "/Work/bad/name" paths))))
       (delete-file db))))
 
+(ert-deftest keemacs-format-candidate-title-width ()
+  "The Title column uses `keemacs-title-width'; other columns use
+`keemacs-field-width'."
+  (let ((keemacs-fields '("Title" "UserName"))
+        (keemacs-title-width 34)
+        (keemacs-field-width 24))
+    (let* ((cand (keemacs--format-candidate
+                  "/m" '(("Title" . "abc") ("UserName" . "u"))))
+           (cols (split-string cand "\t")))
+      ;; Title padded to 34, UserName to 24.
+      (should (= 34 (string-width (car cols))))
+      (should (= 24 (string-width (cadr cols)))))))
+
 (ert-deftest keemacs-prompt-shows-db-name ()
   "Prompts are tagged with the database name -- but only when more
 than one database is configured, matching the view screen."
