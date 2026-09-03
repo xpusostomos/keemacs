@@ -73,6 +73,39 @@
   :group 'tools
   :prefix "keemacs-")
 
+(defface keemacs-title
+  '((t :inherit default))
+  "Face for the Title column in candidate lines.
+Inherits the default face, so the title follows the user's theme
+(white-on-dark, black-on-light); customize it to give titles their
+own color."
+  :group 'keemacs)
+
+(defface keemacs-field-label
+  '((t :foreground "green"))
+  "Face for field labels (Group, Title, ...) in the view buffer."
+  :group 'keemacs)
+
+(defface keemacs-key-bracket
+  '((t :foreground "green"))
+  "Face for the brackets around keys in the view buffer's key menu.
+The key itself stays uncolored."
+  :group 'keemacs)
+
+(defface keemacs-username
+  '((t :foreground "light blue"))
+  "Face for the UserName column in candidate lines."
+  :group 'keemacs)
+
+(defface keemacs-url
+  '((t :foreground "orange"))
+  "Face for the URL column in candidate lines.
+\"orange\" rather than \"light orange\", which is not a valid color
+name on some displays and rendered uncolored."
+  :group 'keemacs)
+
+
+
 (defcustom keemacs-databases nil
   "List of KeePass databases available for browsing.
 Each element is a database spec plist as in `keemacs-auth-make-db-spec', with
@@ -766,20 +799,24 @@ The line is prefixed with a picture of the entry's custom icon when it
 has one, else a unicode glyph approximating its standard icon (see
 `keemacs--icon-chars')."
   (let* ((prefix (keemacs--candidate-prefix path entry))
+         ;; Per-column face: title inherits the default face (theme colors),
+         ;; username and url are tinted.  The text is padded first, then
+         ;; propertized, so the whole column (padding included) takes the face.
+         (col (lambda (f)
+                (let* ((text (truncate-string-to-width
+                              (keemacs--field entry f)
+                              (if (equal f "Title")
+                                  keemacs-title-width
+                                keemacs-field-width)
+                              0 ?\s))
+                       (face (pcase f
+                               ("Title" 'keemacs-title)
+                               ("UserName" 'keemacs-username)
+                               ("URL" 'keemacs-url))))
+                  (propertize text 'face face))))
          (str (concat prefix
                       (when (not (string-empty-p prefix)) " ")
-                      ;; The Title (the first column) gets its own width,
-                      ;; `keemacs-title-width', so long titles have room;
-                      ;; the other columns use `keemacs-field-width'.
-                      (mapconcat
-                       (lambda (f)
-                         (truncate-string-to-width
-                          (keemacs--field entry f)
-                          (if (equal f "Title")
-                              keemacs-title-width
-                            keemacs-field-width)
-                          0 ?\s))
-                       keemacs-fields "\t"))))
+                      (mapconcat col keemacs-fields "\t"))))
     (put-text-property 0 (length str) 'kb-path path str)
     str))
 
@@ -951,14 +988,21 @@ menu is only shown when already viewing an entry."
                           ("q" "quit"))))
          (half (ceiling (length items) 2))
          (width (apply #'max 0 (mapcar (lambda (i) (length (cadr i))) items)))
-         (fmt (format "[%%c] %%-%ds   %%s" width))
+         (fmt (format "%%s %%-%ds   %%s" width))
          (rows '()))
-    (dotimes (i half)
-      (let ((l (nth i items))
-            (r (nth (+ half i) items)))
-        (push (format fmt (aref (car l) 0) (cadr l)
-                      (if r (format "[%c] %s" (aref (car r) 0) (cadr r)) ""))
-              rows)))
+    (cl-flet ((menu-item (key)
+                ;; "[k]" in `keemacs-key-bracket', the key left uncolored.
+                (concat (propertize "[" 'face 'keemacs-key-bracket)
+                        (char-to-string key)
+                        (propertize "]" 'face 'keemacs-key-bracket))))
+      (dotimes (i half)
+        (let ((l (nth i items))
+              (r (nth (+ half i) items)))
+          (push (format fmt (menu-item (aref (car l) 0)) (cadr l)
+                        (if r (concat (menu-item (aref (car r) 0))
+                                      (format " %s" (cadr r)))
+                          ""))
+                rows))))
     (concat "\n\n" (string-join (nreverse rows) "\n"))))
 
 (defun keemacs--spec-label (spec)
@@ -1001,7 +1045,11 @@ which case there is nothing to hide."
                                      (keemacs--custom-icon-image
                                       uuid (keemacs--icon-pixels 2)))))
                   img)))
-    (let ((inhibit-read-only t))
+    (let ((inhibit-read-only t)
+          (label (lambda (name)
+                   ;; Field label in `keemacs-field-label' face.
+                   (propertize (format "%-10s " name)
+                               'face 'keemacs-field-label))))
       (erase-buffer)
       ;; The entry's own picture, when it has a custom icon.
       (when icon
@@ -1009,16 +1057,15 @@ which case there is nothing to hide."
         (insert "\n\n"))
       ;; Show which database this entry came from when several are configured.
       (when (> (length keemacs-databases) 1)
-        (insert (format "%-10s %s\n" "Database"
-                        (or (keemacs--database-name) "(unknown)"))))
-      (insert (format "%-10s %s\n" "Group"
-                      (keemacs--entry-group
-                       keemacs-view-path)))
+        (insert (funcall label "Database")
+                (or (keemacs--database-name) "(unknown)") "\n"))
+      (insert (funcall label "Group")
+              (keemacs--entry-group keemacs-view-path) "\n")
       (dolist (f '("Title" "UserName"))
-        (insert (format "%-10s %s\n" f (keemacs--field entry f))))
-      (insert (format "%-10s %s\n" "Password" pw))
+        (insert (funcall label f) (keemacs--field entry f) "\n"))
+      (insert (funcall label "Password") pw "\n")
       (dolist (f '("URL" "Notes"))
-        (insert (format "%-10s %s\n" f (keemacs--field entry f))))
+        (insert (funcall label f) (keemacs--field entry f) "\n"))
       (insert (keemacs--view-menu)))
     (goto-char (point-min)))
   (setq buffer-read-only t))
