@@ -433,7 +433,7 @@ The default bindings under the prefix (=C-:= here, any prefix you like):
 | =g=   | =keemacs-group=              |
 | =d=   | =keemacs-select-database=    |
 | =f=   | =keemacs-favorites=          |
-| =k=   | =keemacs-favorites-embark=   |
+| =k=   | =keemacs-favorites-by-key=   |
 | =c=   | =keemacs-auth-forget-cached= |
 | =a=   | =keemacs-add=                |
 

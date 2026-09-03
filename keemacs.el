@@ -1770,7 +1770,7 @@ Returns the chosen entry path."
 
 (defcustom keemacs-favorites-default nil
   "Favorites offered by `keemacs-favorites' and
-`keemacs-favorites-embark'.
+`keemacs-favorites-by-key'.
 A list of favorite spec plists.  Each spec item describes one favorite:
 
   (:key   ?b                 ; key in the favorites menu
@@ -1788,7 +1788,7 @@ At least one of :title and :group must be given: items with neither are
 ignored with a message when the favorites are used.  :key must be a
 character (a one-character string works too) and unique across the
 spec; broken or duplicate items are ignored with a message.  :key is
-only used by `keemacs-favorites-embark'; `keemacs-favorites'
+only used by `keemacs-favorites-by-key'; `keemacs-favorites'
 narrows by typing instead."
   :type '(repeat (plist :key-type (choice (const :key)
                                           (const :title)
@@ -1952,7 +1952,7 @@ copy, view, edit and the insert-at-point actions."
                  embark-target-finders)))
       (embark-act))))
 
-(defun keemacs-favorites-embark (&optional favorites)
+(defun keemacs-favorites-by-key (&optional favorites)
   "Choose a favorite from FAVORITES and act on what it matches.
 FAVORITES is a favorites spec -- a list of plists as documented in
 `keemacs-favorites-default' -- and defaults to it.  The
@@ -2064,7 +2064,7 @@ Completes over each entry's label (its `:name', or the file name)."
 (define-key keemacs-command-map (kbd "g") #'keemacs-group)
 (define-key keemacs-command-map (kbd "d") #'keemacs-select-database)
 (define-key keemacs-command-map (kbd "f") #'keemacs-favorites)
-(define-key keemacs-command-map (kbd "k") #'keemacs-favorites-embark)
+(define-key keemacs-command-map (kbd "k") #'keemacs-favorites-by-key)
 ;; `f' was taken by the favorites; `c' clears the cached master password.
 (define-key keemacs-command-map (kbd "c") #'keemacs-auth-forget-cached)
 (define-key keemacs-command-map (kbd "a") #'keemacs-add)
