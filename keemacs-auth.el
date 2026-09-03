@@ -218,7 +218,7 @@ password."
 ;; representation could be swapped for a struct later without changing any
 ;; caller.
 
-(defconst keemacs-auth-db-spec-keys '(:name :file :keyfile :password :yubi)
+(defconst keemacs-auth-db-spec-keys '(:name :file :keyfile :password :yubi :key)
   "The keywords of a keepass database spec, in canonical order.")
 
 (define-widget 'keemacs-auth-db-spec 'plist
@@ -231,7 +231,8 @@ keyword."
                      (const :file)
                      (const :keyfile)
                      (const :password)
-                     (const :yubi))
+                     (const :yubi)
+                     (const :key))
   :value-type '(choice (const :prompt)
                        (const :tag "none" nil)
                        (string :tag "text")
@@ -254,6 +255,10 @@ Accepted keywords (see `keemacs-auth-db-spec-keys'):
   :yubi      a YubiKey: a keepassxc-cli \"slot[:serial]\" string (e.g.
              \"1:7370001\"), a no-argument function returning one, or nil
              for none.
+  :key       a hotkey for the database, used by
+             `keemacs-select-database-by-key': a character, a one-character
+             string, or a no-argument function returning one.  Omitted
+             means the key is assigned automatically in that menu.
 
 An absent `:password' is NOT the same as an explicit nil -- nil means the
 database genuinely has no master password.  The result is returned in
@@ -264,7 +269,8 @@ canonical key order so `equal' comparisons are order-independent."
          (password (if (plist-member spec-plist :password)
                        (plist-get spec-plist :password)
                      :prompt))
-         (yubi (plist-get spec-plist :yubi)))
+         (yubi (plist-get spec-plist :yubi))
+         (key (plist-get spec-plist :key)))
     ;; Reject unknown keywords, walking only the key positions: values may
     ;; themselves be keywords (e.g. `:password :prompt') and must not be
     ;; mistaken for keys.
@@ -278,7 +284,7 @@ canonical key order so `equal' comparisons are order-independent."
         (when tail (setq tail (cdr tail)))))
     (unless (stringp file)
       (user-error "keepass database spec requires a `:file' keyword"))
-    (list :name name :file file :keyfile keyfile :password password :yubi yubi)))
+    (list :name name :file file :keyfile keyfile :password password :yubi yubi :key key)))
 
 (defun keemacs-auth-db-spec-p (spec)
   "Return non-nil if SPEC is a keepass database spec keyword plist.
@@ -320,6 +326,24 @@ master password)."
   "Return the YubiKey spec of database SPEC, or nil.
 A keepassxc-cli \"slot[:serial]\" string, a no-argument function, or nil."
   (plist-get spec :yubi))
+
+(defun keemacs-auth-db-spec-key (spec)
+  "Return the hotkey spec of database SPEC, or nil.
+A character, a one-character string, a no-argument function returning
+one, or nil -- nil meaning the key is assigned automatically in
+`keemacs-select-database-by-key'."
+  (plist-get spec :key))
+
+(defun keemacs-auth-db-spec-key-char (spec)
+  "Return the hotkey of database SPEC as a character, or nil.
+Resolves every form `keemacs-auth-db-spec-key' documents: a character
+passes through, a one-character string is coerced, a no-argument
+function is called.  nil means the key is assigned automatically in
+`keemacs-select-database-by-key'."
+  (let ((raw (keemacs-auth-db-spec-key spec)))
+    (cond ((characterp raw) raw)
+          ((and (stringp raw) (= (length raw) 1)) (aref raw 0))
+          ((functionp raw) (funcall raw)))))
 
 (defun keemacs-auth-db-spec-normalize (spec)
   "Coerce SPEC into a canonical keepass database spec plist.

@@ -105,7 +105,9 @@ If this reoccurs, then your database file may be corrupt."))
 
 (defcustom keemacs-auth-test-program
   (or (executable-find "keepassxc-cli") "")
-  "keepassxc-cli executable for the optional integration test.")
+  "keepassxc-cli executable for the optional integration test."
+  :type 'string
+  :group 'keemacs)
 
 (defun keemacs-auth-test-run (cmd)
   "Run shell command CMD via /bin/sh, returning its stdout."
@@ -122,7 +124,7 @@ If this reoccurs, then your database file may be corrupt."))
 
 (defun keemacs-auth-test-make-db ()
   "Create a fresh throwaway kdbx with the target entry plus decoys.
-The real SMTP-style entry is 'target' (host x.example.com, user alice, port
+The real SMTP-style entry is `target' (host x.example.com, user alice, port
 443 in the URL).  The decoys deliberately mismatch one credential each, so a
 correct search must reject all of them."
   (let* ((dir (make-temp-file "kpa-test-" t))
@@ -408,11 +410,14 @@ A search must return all entries that match *every* key given, and only them."
   "`keemacs-auth-make-db-spec' builds a canonical keyword plist.
 An omitted `:password' is NOT an explicit nil: the latter means a
 database with no master password, while omission means `:prompt'."
-  ;; All fields given; canonical key order is :name :file :keyfile :password :yubi.
-  (should (equal '(:name "mydb" :file "db.kdbx" :keyfile "k.txt" :password "pw" :yubi "1:7370001")
+  ;; All fields given; canonical key order is :name :file :keyfile :password :yubi :key.
+  (should (equal '(:name "mydb" :file "db.kdbx" :keyfile "k.txt" :password "pw" :yubi "1:7370001" :key nil)
                  (keemacs-auth-make-db-spec :password "pw" :yubi "1:7370001"
                                        :name "mydb" :file "db.kdbx"
                                        :keyfile "k.txt")))
+  ;; A :key is retained as given (character or one-character string).
+  (should (eq ?p (keemacs-auth-db-spec-key (keemacs-auth-make-db-spec :file "d.kdbx" :key ?p))))
+  (should (equal "w" (keemacs-auth-db-spec-key (keemacs-auth-make-db-spec :file "d.kdbx" :key "w"))))
   ;; Password omitted -> :prompt.
   (should (equal :prompt
                  (plist-get (keemacs-auth-make-db-spec :file "db.kdbx") :password)))
@@ -458,10 +463,14 @@ database with no master password, while omission means `:prompt'."
   ;; A bare file name is no longer a valid spec -- use `keemacs-auth-make-db-spec'.
   (should-error (keemacs-auth-db-spec-normalize "db.kdbx"))
   ;; A spec plist carries its fields through, re-canonicalized.
-  (should (equal '(:name nil :file "d.kdbx" :keyfile nil :password nil :yubi "1:7")
+  (should (equal '(:name nil :file "d.kdbx" :keyfile nil :password nil :yubi "1:7" :key nil)
                  (keemacs-auth-db-spec-normalize (keemacs-auth-make-db-spec
                                              :file "d.kdbx" :password nil
                                              :yubi "1:7"))))
+  ;; A :key survives normalization.
+  (should (eq ?w (keemacs-auth-db-spec-key
+                  (keemacs-auth-db-spec-normalize
+                   (keemacs-auth-make-db-spec :file "d.kdbx" :key ?w)))))
   ;; A :name survives normalization.
   (should (equal "mydb"
                  (keemacs-auth-db-spec-name
@@ -469,7 +478,7 @@ database with no master password, while omission means `:prompt'."
                                               :file "db.kdbx" :name "mydb")))))
   ;; Key file, password and yubi may be functions, retained as-is.
   (let ((kf (lambda () "k.txt")) (ps (lambda () "pw")) (ys (lambda () "1:7")))
-    (should (equal (list :name nil :file "db.kdbx" :keyfile kf :password ps :yubi ys)
+    (should (equal (list :name nil :file "db.kdbx" :keyfile kf :password ps :yubi ys :key nil)
                    (keemacs-auth-db-spec-normalize (keemacs-auth-make-db-spec
                                                :file "db.kdbx" :keyfile kf
                                                :password ps :yubi ys)))))
@@ -539,7 +548,6 @@ password is cached separately, and entries with portless URLs are found
 by searches that request a port."
   (let* ((keemacs-auth-cache-expiry nil)
         (keemacs-auth--active-cli 'keepassxc)
-        (dir (make-temp-file "kpa-multi-" t))
         (db1 (concat (file-name-as-directory (make-temp-file "one-" t)) "one.kdbx"))
         (db2 (concat (file-name-as-directory (make-temp-file "two-" t)) "two.kdbx"))
         (auth-sources (list (keemacs-auth-make-db-spec :file db1)
@@ -653,7 +661,6 @@ Exercises `keemacs-auth-make-db-spec' through the backend parser and the full
 search path (password supplied as a string in the spec)."
   (let* ((keemacs-auth-cache-expiry nil)
          (keemacs-auth--active-cli 'keepassxc)
-         (dir (make-temp-file "kpa-spec-" t))
          (db (concat (file-name-as-directory (make-temp-file "spec-db-" t)) "db.kdbx")))
     (unless (executable-find "keepassxc-cli")
       (ert-skip "keepassxc-cli not available"))

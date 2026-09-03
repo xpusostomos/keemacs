@@ -125,6 +125,18 @@ plist).  Set interactively with `keemacs-select-database'."
                  keepass-db-spec)
   :group 'keemacs)
 
+(defcustom keemacs-always-select-database nil
+  "Whether to ask which database to use on every command.
+Nil (the default) means the user is prompted only when no database is
+active yet; once one is selected it stays active until switched with
+`keemacs-select-database' or `keemacs-select-database-by-key'.  Non-nil
+means every command that needs a database asks first, through the menu
+it uses -- `keemacs-select-database' normally, the hotkey menu in
+`keemacs-favorites-by-key'.  With exactly one configured database there
+is nothing to choose, so it is picked automatically either way."
+  :type 'boolean
+  :group 'keemacs)
+
 ;; If the database *list* is re-set, any previously selected database may
 ;; point at something stale (a fixed/removed entry), and
 ;; `keemacs--ensure-database' would keep using it because it only
@@ -359,10 +371,12 @@ resolved master password (possibly `:no-password')."
          (keemacs--db-yubi)
          args))
 
-(defun keemacs--require-db ()
+(defun keemacs--require-db (&optional selector)
   "Signal an error unless a database is configured.
-Also applies the default-to-sole-database rule."
-  (keemacs--ensure-database))
+Also applies the default-to-sole-database rule.  SELECTOR, when given,
+is the function that prompts for a database; it is passed to
+`keemacs--ensure-database'."
+  (keemacs--ensure-database selector))
 
 ;;; Listing and parsing
 
@@ -1960,9 +1974,11 @@ favorites are offered as a keyed menu (key, title or group, group);
 picking one searches the database for the entries it matches.  A single
 match goes straight to the embark action menu on that entry (view,
 copy, insert, ...); several matches are offered in a keyed menu of
-their own first, then the chosen entry goes to the same action menu."
+their own first, then the chosen entry goes to the same action menu.
+The database to search is chosen with `keemacs-select-database-by-key'
+when one is needed."
   (interactive)
-  (keemacs--require-db)
+  (keemacs--require-db #'keemacs-select-database-by-key)
   (let* ((spec (keemacs-favorites--assign-keys
                 (keemacs-favorites--parse
                  (or favorites keemacs-favorites-default))))
@@ -2011,17 +2027,18 @@ plists, got %S" keemacs-databases))
       (user-error "Each element of `keemacs-databases' must be a \
 database spec plist such as (:file \"...\") ; got %S" entry))))
 
-(defun keemacs--ensure-database ()
+(defun keemacs--ensure-database (&optional selector)
   "Make sure a database is selected.
-If `keemacs-database' is already set, leave it.  Otherwise, if
-`keemacs-databases' has exactly one entry, select it automatically;
-if it has several and the user has not picked one yet, prompt them with
-`keemacs-select-database'."
+If `keemacs-database' is already set and `keemacs-always-select-database'
+is nil, leave it.  Otherwise, if `keemacs-databases' has exactly one
+entry, select it automatically; if it has several, prompt them with
+SELECTOR -- `keemacs-select-database' by default."
   (keemacs--check-databases)
-  (unless keemacs-database
+  (when (or keemacs-always-select-database
+            (null keemacs-database))
     (if (= 1 (length keemacs-databases))
         (setq keemacs-database (car keemacs-databases))
-      (keemacs-select-database)))
+      (funcall (or selector #'keemacs-select-database))))
   keemacs-database)
 
 ;;;###autoload
@@ -2041,6 +2058,50 @@ Completes over each entry's label (its `:name', or the file name)."
     (setq keemacs-database entry)
     (message "Using KeePass database %s" chosen)
     keemacs-database))
+
+(defun keemacs-select-database-by-key ()
+  "Select the active KeePass database with a hotkey menu.
+Presents every database in `keemacs-databases' via
+`read-multiple-choice': key, label (the `:name', or the file name), and
+the file as the description.  A database whose spec carries a `:key'
+keeps it; keyless databases are assigned one with
+`keemacs-favorites--key-for', given their label and the keys already
+taken -- the same rule the favorites menus use."
+  (interactive)
+  (keemacs--check-databases)
+  (unless keemacs-databases
+    (user-error "`keemacs-databases' is empty -- add your databases first"))
+  ;; (LABEL . SPEC) for each database, then keys assigned label-wise.
+  (let* ((pairs (mapcar (lambda (spec)
+                          (cons (keemacs--spec-label spec) spec))
+                        keemacs-databases))
+         (used (delq nil (mapcar (lambda (e)
+                                   (keemacs-auth-db-spec-key-char (cdr e)))
+                                 pairs)))
+         (keyed (mapcar (lambda (entry)
+                          (let* ((label (car entry))
+                                 (spec (cdr entry))
+                                 (key (or (keemacs-auth-db-spec-key-char spec)
+                                          (keemacs-favorites--key-for label used))))
+                            (push key used)
+                            (cons key entry)))
+                        pairs))
+         (choices (mapcar (lambda (keyed-entry)
+                            (let* ((label (cdr keyed-entry))
+                                   (spec (keemacs-auth-db-spec-normalize
+                                          (cdr label)))
+                                   (file (keemacs-auth-db-spec-file spec)))
+                              (list (car keyed-entry)
+                                    (car label)
+                                    file)))
+                        keyed)))
+    (pcase (read-multiple-choice "Database: " choices)
+      (`(,key ,name . ,_)
+       (let ((entry (cdr (cdr (seq-find (lambda (ke) (eq (car ke) key))
+                                        keyed)))))
+         (setq keemacs-database entry)
+         (message "Using KeePass database %s" name)
+         keemacs-database)))))
 
 ;;;; Command keymap
 ;;
@@ -2068,6 +2129,7 @@ Completes over each entry's label (its `:name', or the file name)."
 ;; `f' was taken by the favorites; `c' clears the cached master password.
 (define-key keemacs-command-map (kbd "c") #'keemacs-auth-forget-cached)
 (define-key keemacs-command-map (kbd "a") #'keemacs-add)
+(define-key keemacs-command-map (kbd "K") #'keemacs-select-database-by-key)
 ;; Group maintenance: uppercase, the entry-level sibling is lowercase.
 (define-key keemacs-command-map (kbd "A") #'keemacs-add-group)
 (define-key keemacs-command-map (kbd "D") #'keemacs-delete-group)

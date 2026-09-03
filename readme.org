@@ -104,6 +104,7 @@ The accepted keywords:
 | =:keyfile= | the key file: a file name, a function returning one, or =nil=.          |
 | =:password= | the master password: a string, a function returning one, =:prompt= (ask the user), or =nil= (no master password).  Omitted means =:prompt=. |
 | =:yubi= | a YubiKey: a keepassxc-cli =slot[:serial]= string (e.g. ="1:7370001"=), a function returning one, or =nil= for none. |
+| =:key= | a hotkey for the database in =keemacs-select-database-by-key=: a character, a one-character string, or a function returning one.  Omitted means a key is assigned automatically in that menu. |
 
 A keyword value may be a *no-argument function* wherever a string is
 allowed (=:keyfile=, =:password=, =:yubi=) -- the function is called each
@@ -364,7 +365,19 @@ the call is evaluated.
 With several databases configured, the first command you run asks which
 one to use (=keemacs-select-database=); with exactly one it is
 selected automatically.  You can switch at any time with <kbd>M-x</kbd>
-=keemacs-select-database=.
+=keemacs-select-database=, or with <kbd>M-x</kbd>
+=keemacs-select-database-by-key=: a hotkey menu of the configured
+databases, where each database's key is its =:key= (in any of the
+documented forms) or, keyless, an automatically assigned mnemonic from
+its name.
+
+By default the question is asked only once: the chosen database stays
+active until you switch.  Set =keemacs-always-select-database= to
+non-nil to be asked on every command instead -- <kbd>M-x</kbd>
+=keemacs-favorites-by-key= then asks through the hotkey menu, the
+other commands through the completion list.  With exactly one
+configured database there is nothing to choose, so it is picked
+automatically either way.
 
 *** Using keemacs
 
@@ -436,6 +449,9 @@ The default bindings under the prefix (=C-:= here, any prefix you like):
 | =k=   | =keemacs-favorites-by-key=   |
 | =c=   | =keemacs-auth-forget-cached= |
 | =a=   | =keemacs-add=                |
+| =K=   | =keemacs-select-database-by-key= |
+| =A=   | =keemacs-add-group=          |
+| =D=   | =keemacs-delete-group=       |
 
 On Emacs versions without =keymap-global-set= (pre-29), the classic
 spelling is:

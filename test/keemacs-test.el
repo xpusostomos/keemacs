@@ -51,7 +51,6 @@
   `(when keemacs-test-program
      (let* ((db (keemacs-test-make-db))
             (keemacs-database (keemacs-auth-make-db-spec :file db))
-            (keemacs-cache-expiry nil)
             (password-cache-expiry nil))
        (password-cache-add db "PASS")
        (unwind-protect
@@ -135,6 +134,104 @@
       ;; The first label is "work"; the matching entry is the whole plist.
       (should (equal '(:name "work" :file "/a/work.kdbx") result))
       (should (equal result keemacs-database)))))
+
+(ert-deftest keemacs-select-database-by-key ()
+  "The by-key menu offers (KEY LABEL FILE) choices and stores the whole
+plist spec of the picked database.  Every documented `:key' form is
+honoured -- a character, a one-character string, a function -- and
+keyless databases get an auto-assigned mnemonic key."
+  (let ((keemacs-databases
+         '((:name "work" :key "w" :file "/a/work.kdbx")
+           (:file "/b/personal.kdbx")))
+        (keemacs-database nil))
+    ;; The string "w" is coerced to ?w; the keyless database is assigned
+    ;; the first free character of its label, ?p.
+    (let ((choices-box (list nil)))
+      (cl-letf (((symbol-function 'read-multiple-choice)
+                 (lambda (_prompt choices &rest _)
+                   (setcar choices-box choices)
+                   (assq ?p choices))))
+        (should (equal '(:file "/b/personal.kdbx")
+                       (keemacs-select-database-by-key))))
+      (should (equal '((?w "work" "/a/work.kdbx")
+                       (?p "personal.kdbx" "/b/personal.kdbx"))
+                     (car choices-box)))
+      (should (equal '(:file "/b/personal.kdbx") keemacs-database))))
+  ;; Picking the explicitly keyed database stores that whole plist.
+  (let ((keemacs-databases
+         '((:name "work" :key ?w :file "/a/work.kdbx")
+           (:file "/b/personal.kdbx")))
+        (keemacs-database nil))
+    (cl-letf (((symbol-function 'read-multiple-choice)
+               (lambda (_prompt choices &rest _) (assq ?w choices))))
+      (should (equal '(:name "work" :key ?w :file "/a/work.kdbx")
+                     (keemacs-select-database-by-key))))
+    (should (equal '(:name "work" :key ?w :file "/a/work.kdbx")
+                   keemacs-database)))
+  ;; A function :key is called and its result used.
+  (let ((keemacs-databases
+         '((:name "f" :key (lambda () ?f) :file "/f.kdbx")))
+        (keemacs-database nil))
+    (cl-letf (((symbol-function 'read-multiple-choice)
+               (lambda (_prompt choices &rest _) (assq ?f choices))))
+      (should (equal '(:name "f" :key (lambda () ?f) :file "/f.kdbx")
+                     (keemacs-select-database-by-key))))
+    (should (equal keemacs-databases (list keemacs-database)))))
+
+(ert-deftest keemacs-ensure-database-prompt-frequency ()
+  "`keemacs-always-select-database' decides whether an already active
+database is kept (nil, the default) or the selector is asked again
+(non-nil).  A single configured database is always picked silently."
+  (let* ((dbs '((:name "work" :file "/a/work.kdbx")
+                (:file "/b/personal.kdbx")))
+         (keemacs-databases dbs)
+         (keemacs-database (car dbs)))
+    ;; Default: the active database is kept; nothing prompts.
+    (let ((keemacs-always-select-database nil)
+          (prompts 0))
+      (cl-letf (((symbol-function 'keemacs-select-database)
+                 (lambda () (setq prompts (1+ prompts)))))
+        (should (equal (car dbs) (keemacs--ensure-database)))
+        (should (= 0 prompts))))
+    ;; Non-nil: the selector runs and its choice becomes the active db.
+    (let ((keemacs-always-select-database t))
+      (cl-letf (((symbol-function 'keemacs-select-database)
+                 (lambda () (setq keemacs-database (cadr dbs)))))
+        (should (equal (cadr dbs) (keemacs--ensure-database)))
+        (should (equal (cadr dbs) keemacs-database)))))
+  ;; One database: auto-selected even with always-select on.
+  (let* ((keemacs-databases '((:name "solo" :file "/s.kdbx")))
+         (keemacs-always-select-database t)
+         (keemacs-database nil))
+    (should (equal '(:name "solo" :file "/s.kdbx")
+                   (keemacs--ensure-database)))))
+
+(ert-deftest keemacs-favorites-by-key-selects-database-by-key ()
+  "`favorites-by-key' picks its database with the by-key hotkey menu,
+not `keemacs-select-database'."
+  (let* ((keemacs-favorites-default '((:key ?p :title "Pika")))
+         (keemacs-databases '((:name "work" :key "w" :file "/a/work.kdbx")
+                              (:file "/b/personal.kdbx")))
+         (keemacs-database nil)
+         (by-key-calls 0)
+         (label-calls 0)
+         (acted (list nil))
+         (entries '(("/Backups/Pika" . (("Group" . "/Backups/")
+                                        ("Title" . "Pika"))))))
+    (cl-letf (((symbol-function 'keemacs-select-database-by-key)
+               (lambda ()
+                 (setq by-key-calls (1+ by-key-calls))
+                 (setq keemacs-database (car keemacs-databases))))
+              ((symbol-function 'keemacs-select-database)
+               (lambda () (setq label-calls (1+ label-calls))))
+              ((symbol-function 'keemacs--load-entries) (lambda () entries))
+              ((symbol-function 'read-multiple-choice)
+               (lambda (_prompt choices &rest _) (car choices)))
+              ((symbol-function 'embark-act) (lambda () (setcar acted t))))
+      (keemacs-favorites-by-key))
+    (should (= 1 by-key-calls))
+    (should (= 0 label-calls))
+    (should (car acted))))
 
 (ert-deftest keemacs-entry-mode-map-bindings ()
   "The entry-mode keymap binds group-choosing to `C-c C-p'.
@@ -507,7 +604,8 @@ on commit) and invent a phantom group."
                   ("g" keemacs-group)
                   ("d" keemacs-select-database)
                   ("f" keemacs-favorites)
-                  ("k" keemacs-favorites-embark)
+                  ("k" keemacs-favorites-by-key)
+                  ("K" keemacs-select-database-by-key)
                   ("c" keemacs-auth-forget-cached)
                   ("a" keemacs-add)))
     (let ((resolved (lookup-key keemacs-command-map (kbd (car bind)))))
@@ -524,7 +622,6 @@ on commit) and invent a phantom group."
   "add-group rejects empty names and names containing a slash."
   (let ((db (keemacs-test-make-db))
         (keemacs-database nil)
-        (keemacs-cache-expiry nil)
         (password-cache-expiry nil))
     (unwind-protect
         (progn
@@ -714,8 +811,8 @@ description; group alone is the name."
       (let ((keemacs-favorites-default '((:key ?x))))
         (should-error (keemacs-favorites) :type 'user-error)))))
 
-(ert-deftest keemacs-favorites-embark-flows ()
-  "`favorites-embark': one match goes to the embark action menu; several
+(ert-deftest keemacs-favorites-by-key-flows ()
+  "`favorites-by-key': one match goes to the embark action menu; several
 matches go to a keyed menu of the matches first, then the picked entry
 goes to the same action menu."
   (keemacs-test-with-db
@@ -733,7 +830,7 @@ goes to the same action menu."
                      (setcar menu-box t)
                      (setcar target-box
                              (funcall (car embark-target-finders))))))
-          (keemacs-favorites-embark))
+          (keemacs-favorites-by-key))
         (should (car menu-box))
         (should (equal target-box
                        (list '(keemacs-select . "/Work/github")))))
@@ -747,7 +844,7 @@ goes to the same action menu."
                    (lambda ()
                      (setcar target-box
                              (funcall (car embark-target-finders))))))
-          (keemacs-favorites-embark))
+          (keemacs-favorites-by-key))
         ;; The entries menu's first choice is the github entry; the picked
         ;; entry goes to the action menu, not the default action.
         (should (equal target-box
