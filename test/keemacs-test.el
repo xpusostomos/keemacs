@@ -543,6 +543,41 @@ on commit) and invent a phantom group."
             (should-not (member "/Work/bad/name" paths))))
       (delete-file db))))
 
+(ert-deftest keemacs-prompt-shows-db-name ()
+  "Prompts are tagged with the database name -- but only when more
+than one database is configured, matching the view screen."
+  ;; Two databases: tagged with the active one's name.
+  (let ((keemacs-databases '((:name "mydb" :file "/x.kdbx")
+                             (:name "work" :file "/y.kdbx")))
+        (keemacs-database '(:name "work" :file "/y.kdbx")))
+    (should (equal "KeePass entry (work): "
+                   (keemacs--prompt "KeePass entry: "))))
+  ;; One database: no tag.
+  (let ((keemacs-databases '((:name "mydb" :file "/x.kdbx")))
+        (keemacs-database '(:name "mydb" :file "/x.kdbx")))
+    (should (equal "KeePass entry: " (keemacs--prompt "KeePass entry: "))))
+  ;; None selected: no tag.
+  (let ((keemacs-databases '((:name "mydb" :file "/x.kdbx")))
+        (keemacs-database nil))
+    (should (equal "KeePass entry: " (keemacs--prompt "KeePass entry: ")))))
+
+(ert-deftest keemacs-embark-title-shows-db-name ()
+  "The embark menu title gains a (dbname) prefix -- only with multiple
+databases -- and the target string actions receive is untouched."
+  (let ((keemacs-databases '((:name "mydb" :file "/x.kdbx")
+                             (:name "work" :file "/y.kdbx")))
+        (keemacs-database '(:name "work" :file "/y.kdbx")))
+    (should (equal "Act on keemacs-select (work) ‘/Mail/gmail’"
+                   (keemacs--embark-format-targets
+                    (lambda (&rest _) "Act on keemacs-select ‘/Mail/gmail’")
+                    (list :type 'keemacs-select :target "/Mail/gmail")))))
+  (let ((keemacs-databases '((:name "mydb" :file "/x.kdbx")))
+        (keemacs-database '(:name "mydb" :file "/x.kdbx")))
+    (should (equal "Act on keemacs-select ‘/Mail/gmail’"
+                   (keemacs--embark-format-targets
+                    (lambda (&rest _) "Act on keemacs-select ‘/Mail/gmail’")
+                    (list :type 'keemacs-select :target "/Mail/gmail"))))))
+
 (ert-deftest keemacs-choose-group-offers-root ()
   "The group chooser offers the root / and defaults to it."
   (cl-letf (((symbol-function 'keemacs--group-paths)

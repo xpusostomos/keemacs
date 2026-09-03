@@ -958,6 +958,18 @@ The spec's `:name', or the file name for a spec without one."
   (when keemacs-database
     (keemacs--spec-label keemacs-database)))
 
+(defun keemacs--prompt (label)
+  "Return completion prompt LABEL tagged with the active database's name.
+\"KeePass entry: \" becomes \"KeePass entry (mydb): \" -- but only when
+more than one database is configured (with a single database the tag
+would be noise); LABEL is returned unchanged otherwise.  LABEL should
+end in \": \" or \":\"."
+  (if (and (> (length keemacs-databases) 1)
+           (keemacs--database-name))
+      (concat (string-trim-right label ": ")
+              (format " (%s): " (keemacs--database-name)))
+    label))
+
 (defun keemacs-view-update (reveal)
   "Redraw the current view buffer, revealing the password when REVEAL.
 The password appears once, on its own line after the username.  It is hidden
@@ -1122,7 +1134,7 @@ the first entry; remembers the choice for next time.  Returns the label."
   (let* ((labels (mapcar #'car keemacs-generate-options))
          (default-label (or keemacs--last-generated-charset
                             (car labels)))
-         (chosen (completing-read "Password character set: "
+         (chosen (completing-read (keemacs--prompt "Password character set: ")
                                   labels nil t nil nil default-label)))
     (setq keemacs--last-generated-charset chosen)
     chosen))
@@ -1224,7 +1236,8 @@ other fields in the buffer that opens, then commit with
 The root group \"/\" is always offered, and is the default -- RET alone
 puts the new entry at the top level of the database."
   (let ((groups (cons "/" (keemacs--group-paths))))
-    (completing-read "Group (RET for root): " groups nil nil nil nil "/")))
+    (completing-read (keemacs--prompt "Group (RET for root): ")
+                     groups nil nil nil nil "/")))
 
 ;;; Group maintenance
 
@@ -1247,7 +1260,8 @@ default; then the new group's name is prompted for.  When invoked from
   (interactive)
   (keemacs--require-db)
   (let* ((parent (or parent (keemacs--choose-group)))
-         (name (read-string (format "New group under %s: " parent))))
+         (name (read-string (keemacs--prompt
+                             (format "New group under %s: " parent)))))
     (when (string-blank-p name)
       (user-error "Group name may not be empty"))
     (when (string-match-p "/" name)
@@ -1269,7 +1283,7 @@ moves to the Recycle Bin and can be restored from the GUI."
   (let* ((group (or group
                     ;; Offer only real groups for deletion -- the root
                     ;; cannot be deleted.
-                    (completing-read "Delete group: "
+                    (completing-read (keemacs--prompt "Delete group: ")
                                      (keemacs--group-paths)
                                      nil t)))
          (group (directory-file-name group)))
@@ -1485,6 +1499,30 @@ is preserved)."
 
 (add-to-list 'embark-target-finders #'keemacs--embark-target)
 
+;; With more than one database configured, tag the embark action-menu title
+;; with the active database -- "Act on keemacs (mydb) ‘/Mail/gmail’" -- so
+;; it is always clear which database the actions will hit.  Display only:
+;; the advice touches the formatted title, never the target string that
+;; actions receive.
+(defun keemacs--embark-format-targets (fn target &rest args)
+  "Prefix embark's menu title with the active database's name.
+Around-advice on `embark--format-targets': with several databases
+configured, the formatted title gains a \"(mydb) \" prefix."
+  (let ((title (apply fn target args)))
+    (if (and (> (length keemacs-databases) 1)
+             (keemacs--database-name)
+             (symbolp (plist-get target :type))
+             (string-prefix-p "keemacs" (symbol-name (plist-get target :type))))
+        (let ((pos (string-match-p "‘" title)))
+          (if pos
+              (concat (substring title 0 pos)
+                      (format "(%s) " (keemacs--database-name))
+                      (substring title pos))
+            title))
+      title)))
+
+(advice-add 'embark--format-targets :around #'keemacs--embark-format-targets)
+
 (defun keemacs--build-action-map (&optional excluded)
   "Build an Embark action keymap from `keemacs--actions'.
 EXCLUDED is a list of keys (e.g. \"v\") to leave out.  define-key prepends,
@@ -1602,7 +1640,7 @@ actions (copy username/password, edit, ...).  Returns the chosen path."
   (keemacs--load-entries)
   (let ((keemacs--selecting t))
     (let* ((chosen (consult--read (keemacs--candidates)
-                                  :prompt "KeePass entry: "
+                                  :prompt (keemacs--prompt "KeePass entry: ")
                                   :history keemacs-history
                                   :category 'keemacs
                                   :require-match t
@@ -1633,7 +1671,8 @@ entry returns its path.  Returns nil if a group turns out empty."
                                        (car e) (cdr e)))
                                     subentries)))
              (chosen (consult--read cands
-                                    :prompt (format "KeePass (%s): " group)
+                                    :prompt (keemacs--prompt
+                                             (format "KeePass (%s): " group))
                                     :history keemacs-history
                                     :category 'keemacs
                                     :require-match t
@@ -1826,7 +1865,7 @@ the chosen entry path."
                                 (keemacs--format-candidate
                                  (car e) (cdr e)))
                               matches)
-                      :prompt "KeePass favorite: "
+                      :prompt (keemacs--prompt "KeePass favorite: ")
                       :history keemacs-history
                       :category 'keemacs
                       :require-match t
