@@ -2056,7 +2056,6 @@ Completes over each entry's label (its `:name', or the file name)."
                                    (string= chosen (keemacs--spec-label e)))
                                  entries))))
     (setq keemacs-database entry)
-    (message "Using KeePass database %s" chosen)
     keemacs-database))
 
 (defun keemacs-select-database-by-key ()
@@ -2100,7 +2099,6 @@ taken -- the same rule the favorites menus use."
        (let ((entry (cdr (cdr (seq-find (lambda (ke) (eq (car ke) key))
                                         keyed)))))
          (setq keemacs-database entry)
-         (message "Using KeePass database %s" name)
          keemacs-database)))))
 
 ;;;; Command keymap
