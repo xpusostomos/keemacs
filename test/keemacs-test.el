@@ -713,7 +713,7 @@ childless sections carrying the entry path."
         ;; Subgroups come from the export tree, not from entry fields.
         (keemacs--group-icons '(("/Work" . ("48" . nil)))))
     (keemacs-test-tree-buffer
-      (keemacs-tree--build keemacs-test-entries "/" 0)
+      (keemacs-tree--build keemacs-test-entries "/" 0 nil)
       (let ((top (oref magit-root-section children)))
         (should (= 2 (length top)))     ; /Work/ group, then /email
         (should (eq 'keemacs-tree-group (oref (nth 0 top) type)))
@@ -730,7 +730,7 @@ childless sections carrying the entry path."
          '(("/a" . (("Group" . "/") ("Title" . "a")))))
         (keemacs--group-icons '(("/Empty" . ("48" . nil)))))
     (keemacs-test-tree-buffer
-      (keemacs-tree--build keemacs-test-entries "/" 0)
+      (keemacs-tree--build keemacs-test-entries "/" 0 nil)
       (should (= 2 (length (oref magit-root-section children))))
       (should (string-match-p "Empty/" (buffer-string))))))
 
@@ -898,31 +898,64 @@ A queryable one shows its entries; a locked one only a marker."
             (should (null (oref (nth 1 top) children)))
             (should (string-match-p "b (locked)" (buffer-string)))))))))
 
-(ert-deftest keemacs-tree-expanded-by-default ()
-  "`keemacs-tree-expanded-by-default' opens the groups at build time."
-  (let ((keemacs-test-entries
-         '(("/g/x" . (("Group" . "/g/") ("Title" . "x")))))
-        (keemacs--group-icons '(("/g" . ("48" . nil)))))
-    (keemacs-test-tree-buffer
-      (keemacs-tree--insert)
-      (let ((group (car (oref (car (oref magit-root-section children))
-                              children))))
-        (should (eq 'keemacs-tree-group (oref group type)))
-        ;; Closed by default: the entry under it is invisible.
-        (should (oref group hidden))
-        (goto-char (oref group content))
-        (should (invisible-p (point)))))
-    (let ((keemacs-tree-expanded-by-default t))
-      (keemacs-test-tree-buffer
-        (keemacs-tree--insert)
-        (should (string-match-p "x" (buffer-string)))
-        (let ((group (car (oref (car (oref magit-root-section children))
-                                children))))
-          (should-not (oref group hidden)))))))
+(ert-deftest keemacs-tree-expand-databases-option ()
+  "`keemacs-tree-expand-databases' picks which databases start open."
+  (let* ((db-a (keemacs-auth-make-db-spec :name "a" :file "/a.kdbx"
+                                          :password nil))
+         (db-b (keemacs-auth-make-db-spec :name "b" :file "/b.kdbx"
+                                          :password nil))
+         (keemacs-test-entries
+          '(("/g/x" . (("Group" . "/g/") ("Title" . "x")))))
+         (keemacs--group-icons '(("/g" . ("48" . nil)))))
+    (cl-flet ((group-states ()
+                ;; Hidden state of the two databases' first groups.
+                (mapcar (lambda (db)
+                          (oref (car (oref db children)) hidden))
+                        (oref magit-root-section children))))
+      ;; 'none (the default): every group closed.
+      (with-temp-buffer
+        (keemacs-tree-mode)
+        (setq-local magit-root-section
+                    (make-instance 'magit-section :type 'root))
+        (setq-local magit-insert-section--parent magit-root-section)
+        (let ((keemacs-databases (list db-a db-b))
+              (keemacs-database db-a)
+              (keemacs-tree-expand-databases 'none))
+          (cl-letf (((symbol-function 'keemacs--load-entries)
+                     (lambda () keemacs-test-entries)))
+            (keemacs-tree--insert)
+            (should (equal '(t t) (group-states))))))
+      ;; 'current: only the active database's groups open.
+      (with-temp-buffer
+        (keemacs-tree-mode)
+        (setq-local magit-root-section
+                    (make-instance 'magit-section :type 'root))
+        (setq-local magit-insert-section--parent magit-root-section)
+        (let ((keemacs-databases (list db-a db-b))
+              (keemacs-database db-a)
+              (keemacs-tree-expand-databases 'current))
+          (cl-letf (((symbol-function 'keemacs--load-entries)
+                     (lambda () keemacs-test-entries)))
+            (keemacs-tree--insert)
+            (should (equal '(nil t) (group-states))))))
+      ;; 'all: every loaded database's groups open.
+      (with-temp-buffer
+        (keemacs-tree-mode)
+        (setq-local magit-root-section
+                    (make-instance 'magit-section :type 'root))
+        (setq-local magit-insert-section--parent magit-root-section)
+        (let ((keemacs-databases (list db-a db-b))
+              (keemacs-database db-a)
+              (keemacs-tree-expand-databases 'all))
+          (cl-letf (((symbol-function 'keemacs--load-entries)
+                     (lambda () keemacs-test-entries)))
+            (keemacs-tree--insert)
+            (should (equal '(nil nil) (group-states)))))))))
 
 (ert-deftest keemacs-tree-entry-fields-hidden-until-tab ()
-  "An entry's fields are child lines, revealed by toggling; the
-password is never among them."
+  "An entry's fields are child lines, revealed by toggling.  The
+password shows masked; TAB on it reveals the real value as a sub-line,
+TAB again conceals it."
   (let ((keemacs-test-entries
          '(("/x" . (("Group" . "/") ("Title" . "x") ("UserName" . "u")
                     ("URL" . "https://e") ("Notes" . "n")
@@ -937,18 +970,30 @@ password is never among them."
         (should (eq 'keemacs-tree-entry (oref entry type)))
         (should (oref entry hidden))
         ;; The field text exists, but is invisible until toggled.
-        (should (string-match-p "UserName" (buffer-string)))
         (goto-char (oref entry content))
         (should (invisible-p (point)))
         (keemacs-tree-toggle)
         (should-not (oref entry hidden))
         (should-not (invisible-p (point)))
+        ;; The password field shows masked -- value never in the clear.
+        (should (string-match-p "Password" (buffer-string)))
+        (should (string-match-p "\\*\\{6\\}" (buffer-string)))
+        (should-not (string-match-p "secret" (buffer-string)))
+        ;; TAB on the masked line reveals the value as a sub-line.
+        (goto-char (oref entry content))
+        (re-search-forward "^\\s-*Password")
+        (cl-letf (((symbol-function 'keemacs--entry-get)
+                   (lambda (_) '(("Password" . "secret")))))
+          (keemacs-tree-toggle))
+        (should (string-match-p "secret" (buffer-string)))
+        ;; TAB again conceals it.
+        (goto-char (oref entry content))
+        (re-search-forward "^\\s-*Password")
+        (keemacs-tree-toggle)
+        (should-not (string-match-p "secret" (buffer-string)))
         ;; Field lines are tagged so embark works from them too.
         (goto-char (oref entry content))
-        (should (equal "/x" (get-text-property (point) 'kb-path)))
-        ;; No password line, ever.
-        (should-not (string-match-p "Password" (buffer-string)))
-        (should-not (string-match-p "secret" (buffer-string)))))))
+        (should (equal "/x" (get-text-property (point) 'kb-path)))))))
 
 (ert-deftest keemacs-tree-unlock-opens-database ()
   "Activating a locked database loads it (prompting) and shows its tree."
@@ -976,7 +1021,7 @@ password is never among them."
               (keemacs-tree--insert)
               (should (= 0 loads))      ; locked: not loaded eagerly
               (goto-char (point-min))
-              (keemacs-tree-activate)   ; the locked db line
+              (keemacs-tree-toggle)     ; TAB on the locked db line
               (should (>= loads 1))
               ;; After the unlock the tree shows the database's entries.
               (should (string-match-p "x" (buffer-string)))
@@ -1024,8 +1069,7 @@ password is never among them."
     (unwind-protect
         (cl-letf (((symbol-function 'keemacs--load-entries)
                    (lambda () keemacs-test-entries))
-                  ((symbol-function 'switch-to-buffer) #'ignore)
-                  ((symbol-function 'delete-other-windows) #'ignore))
+                  ((symbol-function 'switch-to-buffer) #'ignore))
           (keemacs))
       (let ((buf (get-buffer "*keemacs-tree*")))
         (should buf)

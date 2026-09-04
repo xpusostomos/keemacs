@@ -43,9 +43,10 @@
 ;; yet create them).
 ;;
 ;; Entry points:
-;;   - `keemacs'            the main screen: a full-window tree view of
-;;     every configured database (groups and entries; RET or mouse-1
-;;     opens an entry, TAB expands, `C-.' opens the action menu)
+;;   - `keemacs'            the main screen: a tree view of every
+;;     configured database (groups and entries; RET or mouse-1 opens an
+;;     entry, TAB expands -- groups, fields and passwords, `C-.' opens
+;;     the action menu)
 ;;   - `keemacs-titles'     pick an entry through the minibuffer
 ;;     (consult/vertico), then act on it (RET and `C-.' both lead to the
 ;;     action menu)
@@ -1731,13 +1732,16 @@ Press `embark-act' (`C-.') on a row to reach the action menu."
 (defclass keemacs-tree-group (magit-section) ())
 (defclass keemacs-tree-entry (magit-section) ())
 
-(defcustom keemacs-tree-expanded-by-default nil
-  "Whether the tree starts with the groups expanded, entries visible.
-Nil (the default) starts every group closed -- the tree shows each
-database and its top-level group headings only; TAB opens a group.
-Non-nil expands the groups.  Either way an entry's fields start
-closed: TAB on an entry reveals them."
-  :type 'boolean
+(defcustom keemacs-tree-expand-databases 'none
+  "Which databases in the tree start with their groups expanded.
+`all' opens the groups of every database that can be read without
+prompting, `current' only the active database's, `none' (the default)
+starts every group closed -- TAB opens one.  Locked databases have
+nothing to show until they are unlocked.  Either way an entry's
+fields start closed: TAB on an entry reveals them."
+  :type '(choice (const :tag "All queryable databases" all)
+                 (const :tag "The active database" current)
+                 (const :tag "None" none))
   :group 'keemacs)
 
 (defvar keemacs-tree-mode-map
@@ -1760,7 +1764,9 @@ The buffer lists every configured database as a tree: one section per
 database, one collapsible section per group, one line per entry.
 \\[keemacs-tree-activate] or mouse-1 on an entry runs
 `keemacs-default-action'; on a group or database it toggles the
-section.  \\[embark-act] opens the action menu for the entry at point,
+section.  \\[keemacs-tree-toggle] expands and collapses -- on an entry
+it reveals the fields, on the masked password line the password.
+\\[embark-act] opens the action menu for the entry at point,
 \\[keemacs-tree-refresh] reloads the loaded databases."
   (setq-local revert-buffer-function #'keemacs-tree-refresh))
 
@@ -1798,12 +1804,27 @@ The result is a plist carrying the entries plus the export globals
 `keemacs--load-entries' publishes, so every database renders from its
 own snapshot no matter how many were loaded since."
   (let ((keemacs-database spec))
-    (list :label (keemacs--spec-label spec)
+    (list :spec spec
+          :label (keemacs--spec-label spec)
           :entries (keemacs--load-entries)
           :groups keemacs--group-icons
           :parents keemacs--entry-parents
           :custom-icons keemacs--entry-custom-icons
           :images keemacs--custom-icons)))
+
+(defun keemacs-tree--db-open-p (spec)
+  "Return non-nil if database SPEC's groups start expanded.
+Per `keemacs-tree-expand-databases': `all' opens every loaded
+database, `current' only the active one, `none' none."
+  (pcase keemacs-tree-expand-databases
+    ('all t)
+    ('current
+     (and keemacs-database
+          (equal (expand-file-name
+                  (keemacs-auth-db-spec-file
+                   (keemacs-auth-db-spec-normalize spec)))
+                 (keemacs--database-path))))
+    (_ nil)))
 
 (defun keemacs-tree--format-db (spec &optional locked)
   "Return the heading string for database SPEC.
@@ -1816,29 +1837,30 @@ be)."
 (defun keemacs-tree--build-db (data depth)
   "Insert the tree of database DATA (from `keemacs-tree--load') at DEPTH.
 Each database renders from its own snapshot of the export globals, so
-the databases never see each other's icons or group maps."
+the databases never see each other's icons or group maps.  Its groups
+start expanded per `keemacs-tree-expand-databases'."
   (let ((keemacs--group-icons (plist-get data :groups))
         (keemacs--entry-parents (plist-get data :parents))
         (keemacs--entry-custom-icons (plist-get data :custom-icons))
         (keemacs--custom-icons (plist-get data :images)))
-    (keemacs-tree--build (plist-get data :entries) "/" depth)))
+    (keemacs-tree--build (plist-get data :entries) "/" depth
+                         (keemacs-tree--db-open-p (plist-get data :spec)))))
 
-(defun keemacs-tree--build (entries group depth)
+(defun keemacs-tree--build (entries group depth open)
   "Insert tree sections for GROUP (path with trailing \"/\") at DEPTH.
 ENTRIES is one database's ((PATH . FIELDS) ...).  Groups come before
 their entries, in the same order `keemacs--group-choose' offers them.
 magit-section does not indent, so the tree indents each level by two
-spaces.  Groups start closed unless `keemacs-tree-expanded-by-default';
-entries always do, TAB revealing their fields."
+spaces.  OPEN says whether the groups start expanded; entries always
+start closed, TAB revealing their fields."
   (let ((inhibit-read-only t))
     (pcase-let* ((`(,groups . ,subentries)
                   (keemacs--group-contents entries group))
-                 (indent (make-string (* 2 depth) ?\s))
-                 (open keemacs-tree-expanded-by-default))
+                 (indent (make-string (* 2 depth) ?\s)))
       (dolist (g groups)
         (magit-insert-section (keemacs-tree-group g (not open))
           (magit-insert-heading (concat indent (keemacs--format-group g)))
-          (keemacs-tree--build entries g (1+ depth))))
+          (keemacs-tree--build entries g (1+ depth) open)))
       (dolist (e subentries)
         (magit-insert-section (keemacs-tree-entry (car e) t)
           (magit-insert-heading (concat indent
@@ -1849,20 +1871,26 @@ entries always do, TAB revealing their fields."
 
 (defun keemacs-tree--insert-fields (path entry indent)
   "Insert ENTRY at PATH's non-empty fields as lines at INDENT.
-Title, UserName, URL and Notes -- never the password, which the view
-buffer reveals on request.  Each line is tagged with the entry's
-`kb-path', so the action menu works from a field line too.  A
-multi-line Notes value shows its first line only."
-  (dolist (field '("Title" "UserName" "URL" "Notes"))
+Title, UserName, URL and Notes; the password shows masked as
+\"******\" -- TAB on it reveals the real password as a sub-line, TAB
+again conceals it.  Each line is tagged with the entry's `kb-path',
+so the action menu works from a field line too.  A multi-line Notes
+value shows its first line only."
+  (dolist (field '("Title" "UserName" "Password" "URL" "Notes"))
     (let ((value (keemacs--field entry field)))
       (unless (string-empty-p value)
-        (let ((str (concat indent
-                           (propertize
-                            (truncate-string-to-width field 10 nil ?\s)
-                            'face 'keemacs-field-label)
-                           " "
-                           (car (split-string value "\n")))))
+        (let* ((masked (equal field "Password"))
+               (str (concat indent
+                            (propertize
+                             (truncate-string-to-width field 10 nil ?\s)
+                             'face 'keemacs-field-label)
+                            " "
+                            (if masked "******"
+                              (car (split-string value "\n"))))))
           (put-text-property 0 (length str) 'kb-path path str)
+          (when masked
+            (put-text-property 0 (length str) 'kb-pw t str)
+            (put-text-property 0 (length str) 'kb-indent indent str))
           (insert str "\n"))))))
 
 (defun keemacs-tree--insert ()
@@ -1923,13 +1951,87 @@ across the rebuild."
                        (prop-match-beginning found)
                      (point-min)))))))
 
+(defun keemacs-tree--toggle-password (section)
+  "Reveal or conceal the password below the masked field line at point.
+SECTION is the entry section the line belongs to; the password is
+fetched fresh from the entry's database."
+  (keemacs-tree--use-db (keemacs-tree--db-section section))
+  (let ((inhibit-read-only t)
+        (pw-line (cond ((get-text-property (point) 'kb-pw)
+                        (line-beginning-position))
+                       ((get-text-property (point) 'kb-pw-reveal)
+                        (line-beginning-position 0)))))
+    (when pw-line
+      (save-excursion
+        (goto-char pw-line)
+        (let ((next (line-beginning-position 2)))
+          (if (get-text-property next 'kb-pw-reveal)
+              ;; Conceal: drop the revealed sub-line.
+              (delete-region next (line-beginning-position 3))
+            ;; Reveal: insert the real password as a sub-line.
+            (let* ((path (get-text-property (point) 'kb-path))
+                   (password (cdr (assoc "Password"
+                                         (keemacs--entry-get path))))
+                   (indent (concat (get-text-property (point) 'kb-indent)
+                                   "  ")))
+              (goto-char next)
+              (insert (propertize (concat indent password "\n")
+                                  'kb-path path
+                                  'kb-pw-reveal t)))))))))
+
+(defun keemacs-tree--conceal (section)
+  "Remove any revealed password lines inside SECTION.
+Runs before a section is hidden, so a revealed password never
+survives a collapse."
+  (save-excursion
+    (let ((inhibit-read-only t)
+          (end (oref section end))
+          m)
+      (goto-char (oref section start))
+      (setq m (text-property-search-forward 'kb-pw-reveal t #'eq))
+      (while (and m (< (prop-match-beginning m) end))
+        (goto-char (prop-match-beginning m))
+        (delete-region (line-beginning-position)
+                       (line-beginning-position 2))
+        (setq end (oref section end))
+        (goto-char (oref section start))
+        (setq m (text-property-search-forward 'kb-pw-reveal t #'eq))))))
+
+(defun keemacs-tree--show-ancestors (section)
+  "Open any collapsed ancestors of SECTION, topmost first.
+Toggling a section inside a collapsed group would rip out the
+group's hide overlay -- magit's `remove-overlays' clears any
+overlapping overlay -- leaving the group inconsistent (hidden yet
+showing its text)."
+  (let ((hidden nil)
+        (up (oref section parent)))
+    (while up
+      (when (ignore-errors (oref up hidden))
+        (push up hidden))
+      (setq up (oref up parent)))
+    (dolist (a hidden)
+      (magit-section-show a))))
+
 (defun keemacs-tree-toggle ()
   "Expand or collapse the section at point.
 A group reveals its entries, an entry its fields, a database its
-groups.  Locked databases cannot be toggled -- activate them instead,
-which loads them first."
+groups.  TAB on the masked password line reveals the real password as
+a sub-line; TAB again conceals it.  On a locked database this loads
+the database first, prompting for the master password.  Collapsed
+ancestors open first, so what you toggle is always visible."
   (interactive)
-  (magit-section-toggle (magit-current-section)))
+  (let ((section (magit-current-section)))
+    (keemacs-tree--show-ancestors section)
+    (cond
+     ((or (get-text-property (point) 'kb-pw)
+          (get-text-property (point) 'kb-pw-reveal))
+      (keemacs-tree--toggle-password section))
+     ((and (eq (oref section type) 'keemacs-tree-db)
+           (null (oref section children)))
+      (keemacs-tree--unlock (oref section value)))
+     (t
+      (keemacs-tree--conceal section)
+      (magit-section-toggle section)))))
 
 (defun keemacs-tree--db-section (section)
   "Return the database section SECTION belongs to, or nil.
@@ -1979,15 +2081,21 @@ On an entry: run `keemacs-default-action' -- by default `keemacs-view',
 which replaces this window with the view buffer -- on the entry's own
 database, making it the active one.  On a group: toggle its expansion.
 On a database: toggle it too, unless it is locked, in which case it is
-loaded first (prompting for the master password)."
+loaded first (prompting for the master password).  A revealed password
+is concealed before anything is toggled or opened."
   (interactive)
   (let ((section (magit-current-section)))
+    (keemacs-tree--show-ancestors section)
     (pcase (oref section type)
       ('keemacs-tree-entry
+       (keemacs-tree--conceal section)
        (keemacs-tree--use-db (keemacs-tree--db-section section))
        (keemacs-run-default-action (oref section value)))
-      ('keemacs-tree-group (magit-section-toggle section))
+      ('keemacs-tree-group
+       (keemacs-tree--conceal section)
+       (magit-section-toggle section))
       ('keemacs-tree-db
+       (keemacs-tree--conceal section)
        (if (oref section children)
            (magit-section-toggle section)
          (keemacs-tree--unlock (oref section value))))
@@ -2004,17 +2112,19 @@ loaded first (prompting for the master password)."
 ;;;###autoload
 (defun keemacs ()
   "Open the keemacs main screen: every configured database as a tree.
-A full-window `keemacs-tree-mode' buffer with one section per database
-in `keemacs-databases', its groups beneath it.  A database that can be
-read without prompting -- no master password, or the password known or
-already cached -- is loaded and shown with its groups closed
-(`keemacs-tree-expanded-by-default' opens them); the rest are marked
-\"(locked)\" and load, prompting, when activated.  RET or mouse-1 on an
-entry runs `keemacs-default-action' (by default `keemacs-view') on the
-entry's own database, making it the active one; on a group or database
-it toggles expansion.  TAB toggles too -- on an entry it reveals the
-fields.  `C-.' opens the embark action menu for the entry at point;
-`g' reloads the loaded databases."
+Displays the `keemacs-tree-mode' buffer in the current window, with
+one section per database in `keemacs-databases' and its groups beneath
+it.  A database that can be read without prompting -- no master
+password, or the password known or already cached -- is loaded; the
+rest are marked \"(locked)\" and load, prompting, when expanded.  The
+groups start closed, opened, or only the active database's do, per
+`keemacs-tree-expand-databases'.  RET or mouse-1 on an entry runs
+`keemacs-default-action' (by default `keemacs-view') on the entry's
+own database, making it the active one; on a group or database it
+toggles expansion.  TAB toggles too -- on an entry it reveals the
+fields, on the masked password line the password itself.  `C-.' opens
+the embark action menu for the entry at point; `g' reloads the loaded
+databases."
   (interactive)
   (keemacs--check-databases)
   (unless keemacs-databases
@@ -2024,8 +2134,7 @@ fields.  `C-.' opens the embark action menu for the entry at point;
       (unless (eq major-mode 'keemacs-tree-mode)
         (keemacs-tree-mode))
       (keemacs-tree--insert))
-    (switch-to-buffer buf)
-    (delete-other-windows)))
+    (switch-to-buffer buf)))
 
 ;;;###autoload
 (defun keemacs-titles ()
