@@ -1555,28 +1555,45 @@ structure rather than by parsing the display."
                               (nth vertico--index vertico--candidates)))
       (get-text-property 0 'kb-path (minibuffer-contents))))
 
+(defun keemacs-tree--line-path ()
+  "Return the `kb-path' anywhere on the current line, or nil.
+Point may sit past a line's text -- a click on a short row lands
+there -- so the whole line is searched, not just the character at
+point."
+  (or (get-text-property (point) 'kb-path)
+      (save-excursion
+        (goto-char (line-beginning-position))
+        (let ((eol (line-end-position)))
+          (while (and (< (point) eol)
+                      (not (get-text-property (point) 'kb-path)))
+            (goto-char (next-single-property-change
+                        (point) 'kb-path nil eol)))
+          (and (< (point) eol)
+               (get-text-property (point) 'kb-path))))))
+
 (defun keemacs--embark-target ()
   "Embark target for the entry under point or in the selection minibuffer.
 The target type depends on the context, so Embark shows the right menu:
 `keemacs-view' in the view buffer (whose menu omits the redundant
-view action), `keemacs' in the listing and tree buffers, and
-`keemacs-select' in the selection minibuffer (whose menu adds the
-insert actions, which only make sense while the originating buffer's point
-is preserved)."
+view action), `keemacs' in the listing and tree buffers for entries,
+`keemacs-tree-group' for a tree group, and `keemacs-select' in the
+selection minibuffer (whose menu adds the insert actions, which only
+make sense while the originating buffer's point is preserved)."
   (let (path type)
     (cond
-     ;; In the tree view: the entry at point.  Group lines carry a
-     ;; trailing slash and are deliberately no target -- entry actions
-     ;; on a group path are meaningless.  Acting on an entry first
+     ;; In the tree view: the entry or group at point.  A database line
+     ;; carries no `kb-path' and is no target.  Acting on either first
      ;; selects its own database -- the tree never made one active, and
      ;; an action against the wrong (or no) database errors out, which
      ;; leaves the embark menu open.
      ((derived-mode-p 'keemacs-tree-mode)
-      (let ((p (get-text-property (point) 'kb-path)))
-        (unless (or (null p) (string-suffix-p "/" p))
+      (let ((p (keemacs-tree--line-path)))
+        (when p
           (let ((db (keemacs-tree--db-section (magit-current-section))))
             (when db (keemacs-tree--use-db db)))
-          (setq type 'keemacs path p))))
+          (if (string-suffix-p "/" p)
+              (setq type 'keemacs-tree-group path p)
+            (setq type 'keemacs path p)))))
      ;; In the listing buffer: the entry at point.
      ((derived-mode-p 'keemacs-mode)
       (setq type 'keemacs
@@ -1667,6 +1684,37 @@ preserved while the minibuffer is active."
              '(keemacs-view . keemacs-view-action-map))
 (add-to-list 'embark-keymap-alist
              '(keemacs-select . keemacs-select-action-map))
+
+(defconst keemacs-tree-group-actions
+  '(("d" "delete group" keemacs-delete-group)
+    ("a" "add entry here" keemacs-add)
+    ("A" "add subgroup here" keemacs-add-group))
+  "The single source of truth for the group actions offered in the
+tree's embark menu.  Each element is (KEY LABEL FUNCTION), where
+FUNCTION takes the group path (trailing slash included).")
+
+(defun keemacs-tree-group-toggle (_group)
+  "Toggle the tree group at point; the embark group menu's default.
+GROUP is the target's path -- the group acted on is the one at point,
+whose expansion toggles."
+  (interactive "sGroup: ")
+  (keemacs-tree-toggle))
+
+(defconst keemacs-tree-group-action-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'keemacs-tree-group-toggle)
+    (dolist (entry (reverse keemacs-tree-group-actions))
+      (pcase-let ((`(,key ,_label ,fn) entry))
+        (define-key map (kbd key) fn)))
+    map)
+  "Embark actions for a keemacs tree group target.
+The group acted on is the one at point; the actions run against the
+group's own database, selected when the target was found.")
+
+(add-to-list 'embark-keymap-alist
+             '(keemacs-tree-group . keemacs-tree-group-action-map))
+(add-to-list 'embark-default-action-overrides
+             '(keemacs-tree-group . keemacs-tree-group-toggle))
 
 (defun keemacs-run-default-action (path)
   "Run `keemacs-default-action' on the entry at PATH.
@@ -1886,12 +1934,13 @@ start closed, TAB revealing their fields."
 
 (defun keemacs-tree--insert-fields (path entry indent)
   "Insert ENTRY at PATH's non-empty fields as lines at INDENT.
-Title, UserName, URL and Notes; the password shows masked as
+UserName, Password, URL and Notes -- the title is the entry's own
+line, so it is not repeated as a field.  The password shows masked as
 \"******\" -- TAB on it reveals the real password as a sub-line, TAB
 again conceals it.  Each line is tagged with the entry's `kb-path',
 so the action menu works from a field line too.  A multi-line Notes
 value shows its first line only."
-  (dolist (field '("Title" "UserName" "Password" "URL" "Notes"))
+  (dolist (field '("UserName" "Password" "URL" "Notes"))
     (let ((value (keemacs--field entry field)))
       (unless (string-empty-p value)
         (let* ((masked (equal field "Password"))

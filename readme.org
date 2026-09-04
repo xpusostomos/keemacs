@@ -400,13 +400,17 @@ Four entry points:
   (=keemacs-default-action=, by default *view*) on that entry's own
   database, making it the active one; on a group or database it
   expands or collapses it (<kbd>TAB</kbd> does the same -- on an entry
-  it reveals the entry's title, username, URL and notes right in the
-  tree, with the password masked as =******=; <kbd>TAB</kbd> on the
-  masked line reveals the real password as a sub-line, and collapsing
-  anything conceals it again).  A single click only moves point --
-  double click to act, it is easy to hit an entry by accident.
-  <kbd>C-.</kbd> (=embark-act=) opens the full action menu for the
-  entry at point; =g= reloads the loaded databases.
+  it reveals the entry's username, password, URL and notes right in
+  the tree -- the title is the entry's own line, so it is not
+  repeated -- with the password masked as =******=; <kbd>TAB</kbd> on
+  the masked line reveals the real password as a sub-line, and
+  collapsing anything conceals it again).  A single click only moves
+  point -- double click to act, it is easy to hit an entry by
+  accident.  <kbd>C-.</kbd> (=embark-act=) works anywhere on a row --
+  on an entry it opens the full action menu, on a group a menu of
+  group actions (delete the group, add an entry or a subgroup here;
+  both run against the group's own database); =g= reloads the loaded
+  databases.
 
 - <kbd>M-x</kbd> =keemacs-titles= -- select an entry through the
   minibuffer (consult/vertico completion; typing narrows).  RET runs the

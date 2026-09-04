@@ -816,8 +816,9 @@ so instead of being blank."
         (should (oref section hidden))))))
 
 (ert-deftest keemacs-tree-embark-target ()
-  "The embark finder yields the entry at point, ignores group lines,
-and selects the entry's own database first -- otherwise the action
+  "The embark finder yields the entry at point -- anywhere on its
+line, even past its text -- and a group target on a group line.  It
+also selects the entry's own database first: otherwise the action
 would run against whatever database is active (possibly none) and
 error, leaving the menu open."
   (let ((keemacs-test-entries
@@ -837,12 +838,33 @@ error, leaving the menu open."
       ;; The finder made the entry's database active.
       (should (equal "/test.kdbx"
                      (keemacs-auth-db-spec-file keemacs-database))))
+    ;; A click past the line's text still finds the entry.
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (text-property-search-forward 'kb-path "/Work/github" #'equal)
+      (goto-char (line-end-position))
+      (should (equal (cons 'keemacs "/Work/github")
+                     (keemacs--embark-target))))
+    ;; A group line yields the group target and menu.
     (keemacs-test-tree-buffer
       (keemacs-tree--insert)
       (goto-char (point-min))
       (let ((m (text-property-search-forward 'kb-path "/Work/" #'equal)))
         (goto-char (prop-match-beginning m)))
-      (should-not (keemacs--embark-target)))))
+      (should (equal (cons 'keemacs-tree-group "/Work/")
+                     (keemacs--embark-target))))))
+
+(ert-deftest keemacs-tree-group-action-map ()
+  "The group embark menu offers the group actions."
+  (should (eq (lookup-key keemacs-tree-group-action-map (kbd "d"))
+              #'keemacs-delete-group))
+  (should (eq (lookup-key keemacs-tree-group-action-map (kbd "a"))
+              #'keemacs-add))
+  (should (eq (lookup-key keemacs-tree-group-action-map (kbd "A"))
+              #'keemacs-add-group))
+  (should (eq (lookup-key keemacs-tree-group-action-map (kbd "RET"))
+              #'keemacs-tree-group-toggle)))
 
 (ert-deftest keemacs-tree-entry-heading-not-toggleable ()
   "Entry headings carry no magit heading keymap, so a double click
@@ -1011,6 +1033,8 @@ TAB again conceals it."
         (should (string-match-p "Password" (buffer-string)))
         (should (string-match-p "\\*\\{6\\}" (buffer-string)))
         (should-not (string-match-p "secret" (buffer-string)))
+        ;; The title is the entry's own line, not a repeated sub-line.
+        (should-not (string-match-p "Title" (buffer-string)))
         ;; TAB on the masked line reveals the value as a sub-line.
         (goto-char (oref entry content))
         (re-search-forward "^\\s-*Password")
