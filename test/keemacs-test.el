@@ -600,11 +600,12 @@ on commit) and invent a phantom group."
 
 (ert-deftest keemacs-command-map-bindings ()
   "The command keymap binds every command under C-:."
-  (dolist (bind '(("t" keemacs)
+  (dolist (bind '(("k" keemacs)
+                  ("t" keemacs-titles)
                   ("g" keemacs-group)
                   ("d" keemacs-select-database)
                   ("f" keemacs-favorites)
-                  ("k" keemacs-favorites-by-key)
+                  ("F" keemacs-favorites-by-key)
                   ("K" keemacs-select-database-by-key)
                   ("c" keemacs-auth-forget-cached)
                   ("a" keemacs-add)))
@@ -617,6 +618,261 @@ on commit) and invent a phantom group."
               #'keemacs-add-group))
   (should (eq (lookup-key keemacs-command-map (kbd "D"))
               #'keemacs-delete-group)))
+
+(ert-deftest keemacs-titles-is-flat-selector ()
+  "`keemacs-titles' (the renamed flat selector) completes over the
+candidate list with the `keemacs' category and runs the default action
+on the chosen entry."
+  (let* ((keemacs-database (keemacs-auth-make-db-spec :file "/x.kdbx"))
+         (cand (keemacs--format-candidate
+                "/email" '(("Group" . "/") ("Title" . "email"))))
+         (entry-box (list nil))
+         (category-box (list nil))
+         (keemacs-default-action (lambda (p) (setcar entry-box p)))
+         (path (cl-letf (((symbol-function 'keemacs--candidates)
+                          (lambda () (list cand)))
+                         ((symbol-function 'keemacs--load-entries)
+                          (lambda () nil)))
+                 (cl-letf (((symbol-function 'consult--read)
+                            (lambda (candidates &rest props)
+                              (setcar category-box
+                                      (plist-get props :category))
+                              (car candidates))))
+                   (keemacs-titles)))))
+    (should (equal "/email" path))
+    (should (eq 'keemacs (car category-box)))
+    (should (equal "/email" (car entry-box)))))
+
+;;;; Tree view (the `keemacs' main screen)
+
+(defvar keemacs-test-entries nil
+  "Entries for `keemacs-test-tree-buffer'; let-bind it around use.")
+
+(defmacro keemacs-test-tree-buffer (&rest body)
+  "Build the tree from the stubbed export in a temp buffer and run BODY.
+Sets the tree mode up with a fresh root section, as
+`keemacs-tree--insert' would."
+  (declare (indent 0))
+  `(with-temp-buffer
+     (keemacs-tree-mode)
+     (setq-local magit-root-section (make-instance 'magit-section :type 'root))
+     (setq-local magit-insert-section--parent magit-root-section)
+     (cl-letf (((symbol-function 'keemacs--load-entries)
+                (lambda () keemacs-test-entries)))
+       ,@body)))
+
+(ert-deftest keemacs-tree-mode-keymap ()
+  "The tree mode binds the tree commands and inherits magit-section's."
+  (should (eq (lookup-key keemacs-tree-mode-map (kbd "RET"))
+              #'keemacs-tree-activate))
+  (should (eq (lookup-key keemacs-tree-mode-map (kbd "TAB"))
+              #'keemacs-tree-toggle))
+  (should (eq (lookup-key keemacs-tree-mode-map (kbd "C-."))
+              #'embark-act))
+  (should (eq (lookup-key keemacs-tree-mode-map (kbd "g"))
+              #'keemacs-tree-refresh))
+  (should (eq (lookup-key keemacs-tree-mode-map (kbd "q"))
+              #'quit-window))
+  ;; Inherited from `magit-section-mode-map'.
+  (should (eq (lookup-key keemacs-tree-mode-map (kbd "n"))
+              #'magit-section-forward))
+  (should (eq (lookup-key keemacs-tree-mode-map (kbd "p"))
+              #'magit-section-backward)))
+
+(ert-deftest keemacs-tree-entry-line-title-only ()
+  "The tree entry line is the title only, tagged with the path."
+  (let* ((entry '(("Group" . "/g/") ("Title" . "github")
+                  ("UserName" . "cbit") ("URL" . "https://x")))
+         (line (keemacs-tree--format-entry "/g/github" entry)))
+    (should (string-equal line "github"))
+    (should (equal "/g/github" (get-text-property 0 'kb-path line)))
+    (should (equal 'keemacs-title (get-text-property 0 'face line))))
+  ;; An IconID adds the standard icon glyph as a prefix.
+  (let ((line (keemacs-tree--format-entry
+               "/g/t" '(("Group" . "/g/") ("Title" . "t")
+                        ("IconID" . "0")))))
+    (should (string-match-p " " line))    ; glyph, space, then the title
+    (should (string-suffix-p "t" line))
+    (should (equal "/g/t" (get-text-property 0 'kb-path line)))))
+
+(ert-deftest keemacs-tree-build-sections ()
+  "`keemacs-tree--build' nests group and entry sections.
+Groups keep their trailing-slash path and are headings; entries are
+childless sections carrying the entry path."
+  (let ((keemacs-test-entries
+         '(("/email" . (("Group" . "/") ("Title" . "email")))
+           ("/Work/github" . (("Group" . "/Work/")
+                              ("Title" . "github")))))
+        ;; Subgroups come from the export tree, not from entry fields.
+        (keemacs--group-icons '(("/Work" . ("48" . nil)))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--build keemacs-test-entries "/" 0)
+      (let ((top (oref magit-root-section children)))
+        (should (= 2 (length top)))     ; /Work/ group, then /email
+        (should (eq 'keemacs-tree-group (oref (nth 0 top) type)))
+        (should (equal "/Work/" (oref (nth 0 top) value)))
+        (should (eq 'keemacs-tree-entry (oref (nth 1 top) type)))
+        (should (equal "/email" (oref (nth 1 top) value)))
+        (should (equal '("/Work/github")
+                       (mapcar (lambda (s) (oref s value))
+                               (oref (nth 0 top) children))))))))
+
+(ert-deftest keemacs-tree-includes-empty-group ()
+  "A group recorded in the export with no entries still gets a section."
+  (let ((keemacs-test-entries
+         '(("/a" . (("Group" . "/") ("Title" . "a")))))
+        (keemacs--group-icons '(("/Empty" . ("48" . nil)))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--build keemacs-test-entries "/" 0)
+      (should (= 2 (length (oref magit-root-section children))))
+      (should (string-match-p "Empty/" (buffer-string))))))
+
+(ert-deftest keemacs-tree-insert-tags-lines ()
+  "`keemacs-tree--insert' tags entry lines with the entry path and
+group headings with the group path (trailing slash).  An empty
+database gets a placeholder instead of a blank buffer."
+  (let ((keemacs-test-entries
+         '(("/email" . (("Group" . "/") ("Title" . "email")))
+           ("/Work/github" . (("Group" . "/Work/")
+                              ("Title" . "github")))))
+        (keemacs--group-icons '(("/Work" . ("48" . nil)))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (should (string-match-p "Work/" (buffer-string)))
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/Work/github"
+                                             #'equal)))
+        (should m)
+        (goto-char (prop-match-beginning m))
+        (should (string-match-p
+                 "github" (buffer-substring (point) (line-end-position)))))
+      (goto-char (point-min))
+      (should (text-property-search-forward 'kb-path "/Work/" #'equal))))
+  (let ((keemacs-test-entries nil)
+        (keemacs--group-icons nil))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (should (string-match-p "(empty database)" (buffer-string))))))
+
+(ert-deftest keemacs-tree-activate-entry-runs-default-action ()
+  "RET (activate) on an entry runs the default action on its path."
+  (let* ((keemacs-test-entries
+          '(("/email" . (("Group" . "/") ("Title" . "email")))))
+         (action-box (list nil))
+         (keemacs-default-action (lambda (p) (setcar action-box p))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/email" #'equal)))
+        (goto-char (prop-match-beginning m)))
+      (keemacs-tree-activate))
+    (should (equal "/email" (car action-box)))))
+
+(ert-deftest keemacs-tree-activate-group-toggles ()
+  "RET (activate) on a group heading toggles its expansion."
+  (let ((keemacs-test-entries
+         '(("/Work/github" . (("Group" . "/Work/")
+                              ("Title" . "github")))))
+        (keemacs--group-icons '(("/Work" . ("48" . nil)))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/Work/" #'equal)))
+        (goto-char (prop-match-beginning m)))
+      (let ((section (magit-current-section)))
+        (should (eq 'keemacs-tree-group (oref section type)))
+        (keemacs-tree-activate)
+        (should (oref section hidden))
+        (keemacs-tree-activate)
+        (should-not (oref section hidden))))))
+
+(ert-deftest keemacs-tree-embark-target ()
+  "The embark finder yields the entry at point and ignores group lines."
+  (let ((keemacs-test-entries
+         '(("/email" . (("Group" . "/") ("Title" . "email")))
+           ("/Work/github" . (("Group" . "/Work/")
+                              ("Title" . "github")))))
+        (keemacs--group-icons '(("/Work" . ("48" . nil)))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/Work/github"
+                                             #'equal)))
+        (goto-char (+ (prop-match-beginning m) 2)))
+      (should (equal (cons 'keemacs "/Work/github")
+                     (keemacs--embark-target))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/Work/" #'equal)))
+        (goto-char (prop-match-beginning m)))
+      (should-not (keemacs--embark-target)))))
+
+(ert-deftest keemacs-tree-refresh-keeps-point ()
+  "`keemacs-tree-refresh' rebuilds and keeps point on its entry."
+  (let ((keemacs-test-entries
+         '(("/a" . (("Group" . "/") ("Title" . "a")))
+           ("/b" . (("Group" . "/") ("Title" . "b"))))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/b" #'equal)))
+        (goto-char (prop-match-beginning m)))
+      (setq keemacs-test-entries
+            '(("/b" . (("Group" . "/") ("Title" . "b")))))
+      (keemacs-tree-refresh)
+      (should (equal "/b" (get-text-property (point) 'kb-path))))))
+
+(ert-deftest keemacs-tree-buffer-is-read-only ()
+  "The tree buffer is read-only (magit-section-mode sets it)."
+  (with-temp-buffer
+    (keemacs-tree-mode)
+    (should buffer-read-only)))
+
+(ert-deftest keemacs-tree-command-opens-full-window ()
+  "M-x keemacs opens the full-window tree buffer."
+  (let ((keemacs-database (keemacs-auth-make-db-spec :file "/x.kdbx"))
+        (keemacs-test-entries
+         '(("/email" . (("Group" . "/") ("Title" . "email"))))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'keemacs--load-entries)
+                   (lambda () keemacs-test-entries))
+                  ((symbol-function 'switch-to-buffer) #'ignore)
+                  ((symbol-function 'delete-other-windows) #'ignore))
+          (keemacs))
+      (let ((buf (get-buffer "*keemacs-tree*")))
+        (should buf)
+        (with-current-buffer buf
+          (should (eq major-mode 'keemacs-tree-mode))
+          (should (string-match-p "email" (buffer-string))))
+        (kill-buffer buf)))))
+
+(ert-deftest keemacs-tree-real-database ()
+  "The tree shows the real fixture database's groups and entries."
+  (keemacs-test-with-db
+    (with-temp-buffer
+      (keemacs-tree-mode)
+      (keemacs-tree--insert)
+      (should (string-match-p "Work/" (buffer-string)))
+      (should (string-match-p "github" (buffer-string)))
+      (should (string-match-p "email" (buffer-string)))
+      (goto-char (point-min))
+      (should (text-property-search-forward 'kb-path "/Work/github"
+                                            #'equal)))))
+
+(ert-deftest keemacs-tree-embark-target-real ()
+  "The embark finder works against a real exported database."
+  (keemacs-test-with-db
+    (with-temp-buffer
+      (keemacs-tree-mode)
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/Work/github"
+                                             #'equal)))
+        (should m)
+        (goto-char (prop-match-beginning m))
+        (should (equal (cons 'keemacs "/Work/github")
+                       (keemacs--embark-target)))))))
 
 (ert-deftest keemacs-add-group-name-validation ()
   "add-group rejects empty names and names containing a slash."

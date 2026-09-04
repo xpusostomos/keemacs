@@ -313,12 +313,14 @@ a stale cached value can mask the change.  Run:
 
 ** keemacs: a KeePass client inside Emacs
 
-=keemacs= lists the entries of a KeePass database, lets you pick
-one by typing, views it with the password hidden, and acts on it: copy
-any field to the clipboard, insert into the current buffer, or add,
-clone, edit and delete entries.  It uses =consult= (works with =vertico=)
-for selection and =embark= for the action menu, so if you already live in
-that ecosystem it fits right in.
+=keemacs= shows the entries of a KeePass database in a tree-shaped
+main screen -- the groups as collapsible sections, the entries as
+lines under them -- and lets you act on an entry: view it with the
+password hidden, copy any field to the clipboard, insert into the
+current buffer, or add, clone, edit and delete entries.  The tree is
+built with =magit-section=; selection in the other views uses
+=consult= (works with =vertico=) and =embark= for the action menu, so
+if you already live in that ecosystem it fits right in.
 
 It deliberately reuses everything from =keemacs-auth=: the same
 =keepassxc-cli= execution, the same master-password prompting/caching,
@@ -327,6 +329,7 @@ and the same database specification.
 *** Requirements
 
 - =keemacs-auth= (in this repository)
+- =magit-section= -- the tree library, installable from [[https://melpa.org/][MELPA]] or GNU ELPA
 - =consult=, =embark= and =embark-consult= -- installable from [[https://melpa.org/][MELPA]]
   (embark-consult provides preview in the selection minibuffer)
 - =keepassxc-cli= on your =exec-path= (the browse features are built
@@ -381,9 +384,18 @@ automatically either way.
 
 *** Using keemacs
 
-Three entry points:
+Four entry points:
 
-- <kbd>M-x</kbd> =keemacs= -- select an entry through the
+- <kbd>M-x</kbd> =keemacs= -- the *main screen*: a full-window tree
+  of the active database, one collapsible section per group, one line
+  per entry (title only, with the entry's icon).  <kbd>RET</kbd> or
+  mouse-1 on an entry runs the default action
+  (=keemacs-default-action=, by default *view*); on a group it expands
+  or collapses it (<kbd>TAB</kbd> does the same).  <kbd>C-.</kbd>
+  (=embark-act=) opens the full action menu for the entry at point;
+  =g= reloads the database.
+
+- <kbd>M-x</kbd> =keemacs-titles= -- select an entry through the
   minibuffer (consult/vertico completion; typing narrows).  RET runs the
   default action (=keemacs-default-action=, by default *view*);
   <kbd>C-.</kbd> opens the full action menu.
@@ -442,11 +454,12 @@ The default bindings under the prefix (=C-:= here, any prefix you like):
 
 | key   | command                             |
 |-------+-------------------------------------|
-| =t=   | =keemacs=                    |
+| =k=   | =keemacs= (the tree main screen) |
+| =t=   | =keemacs-titles=             |
 | =g=   | =keemacs-group=              |
 | =d=   | =keemacs-select-database=    |
 | =f=   | =keemacs-favorites=          |
-| =k=   | =keemacs-favorites-by-key=   |
+| =F=   | =keemacs-favorites-by-key=   |
 | =c=   | =keemacs-auth-forget-cached= |
 | =a=   | =keemacs-add=                |
 | =K=   | =keemacs-select-database-by-key= |
@@ -601,9 +614,9 @@ The integration tests (and the browse suite generally) require
 =keepassxc-cli= on =exec-path=; they are skipped wholesale when it is
 missing, so both suites are safe to run on machines without KeePassXC.
 
-The browse suite also needs =consult=, =embark= and =embark-consult=
-findable (add their =elpa/= directories to =load-path=, as with a normal
-install), since =keemacs= requires them.
+The browse suite also needs =consult=, =embark=, =embark-consult= and
+=magit-section= findable (add their =elpa/= directories to =load-path=,
+as with a normal install), since =keemacs= requires them.
 
 ** License and source
 

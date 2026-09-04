@@ -6,7 +6,7 @@
 ;; Maintainer: Chris Bitmead <xpusostomos@gmail.com>
 ;; Assisted-by: Claude
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (consult "0.1") (embark "0.1") (embark-consult "0.1"))
+;; Package-Requires: ((emacs "27.1") (consult "0.1") (embark "0.1") (embark-consult "0.1") (magit-section "4.0"))
 ;; Keywords: comm, tools, passwords, keepassxc
 ;; URL: https://github.com/xpusostomos/keemacs
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -42,10 +42,14 @@
 ;; exposes.  Custom attributes are not yet supported (keepassxc-cli cannot
 ;; yet create them).
 ;;
-;; Two entry points:
-;;   - `keemacs'            pick an entry through the minibuffer
+;; Entry points:
+;;   - `keemacs'            the main screen: a full-window tree view of
+;;     the active database (groups and entries; RET or mouse-1 opens an
+;;     entry, `C-.' opens the action menu)
+;;   - `keemacs-titles'     pick an entry through the minibuffer
 ;;     (consult/vertico), then act on it (RET and `C-.' both lead to the
 ;;     action menu)
+;;   - `keemacs-group'      drill down group by group in the minibuffer
 ;;   - `keemacs-buffer'     a columned listing buffer (Embark works
 ;;     on the entry at point)
 ;;
@@ -65,6 +69,7 @@
 (require 'embark-consult)
 (require 'image)
 (require 'keemacs-auth)
+(require 'magit-section)
 (require 'password-cache)
 (require 'subr-x)
 
@@ -215,7 +220,7 @@ until a choice is remembered.  Add, remove or reorder your own sets here."
   :group 'keemacs)
 
 (defcustom keemacs-default-action #'keemacs-view
-  "Function run on the selected entry when `keemacs' returns.
+  "Function run on the selected entry when a selector command returns.
 Called with the entry path.  The default, `keemacs-view', shows the
 entry; it can be changed to e.g. `keemacs-copy-password' to copy the
 password directly on RET."
@@ -1553,12 +1558,19 @@ structure rather than by parsing the display."
   "Embark target for the entry under point or in the selection minibuffer.
 The target type depends on the context, so Embark shows the right menu:
 `keemacs-view' in the view buffer (whose menu omits the redundant
-view action), `keemacs' in the listing buffer, and
+view action), `keemacs' in the listing and tree buffers, and
 `keemacs-select' in the selection minibuffer (whose menu adds the
 insert actions, which only make sense while the originating buffer's point
 is preserved)."
   (let (path type)
     (cond
+     ;; In the tree view: the entry at point.  Group lines carry a
+     ;; trailing slash and are deliberately no target -- entry actions
+     ;; on a group path are meaningless.
+     ((derived-mode-p 'keemacs-tree-mode)
+      (let ((p (get-text-property (point) 'kb-path)))
+        (unless (or (null p) (string-suffix-p "/" p))
+          (setq type 'keemacs path p))))
      ;; In the listing buffer: the entry at point.
      ((derived-mode-p 'keemacs-mode)
       (setq type 'keemacs
@@ -1637,8 +1649,8 @@ preserved while the minibuffer is active."
 ;; The default Embark action for our target types is `keemacs-view'
 ;; (via the wrapper), not -- as Embark would otherwise fall back to for
 ;; minibuffer targets -- the command that opened the minibuffer
-;; (`keemacs' itself), which would run the selector recursively and
-;; error.
+;; (`keemacs-titles' itself), which would run the selector recursively
+;; and error.
 (mapc (lambda (type)
         (add-to-list 'embark-default-action-overrides
                      (cons type #'keemacs-run-default-action)))
@@ -1705,8 +1717,154 @@ Press `embark-act' (`C-.') on a row to reach the action menu."
       (keemacs-mode))
     (keemacs--insert-list)))
 
+;;;; Tree view
+;;
+;; The main screen: the whole active database as a magit-section tree of
+;; groups and entries in one full-window buffer.
+
+;; magit-section matches sections by their class.  Plain symbols as the
+;; class only work for magit's own registered types (per its docstring,
+;; an "undocumented kludge" not available to other packages), so the
+;; tree declares real subclasses.
+(defclass keemacs-tree-group (magit-section) ())
+(defclass keemacs-tree-entry (magit-section) ())
+
+(defvar keemacs-tree-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map magit-section-mode-map)
+    (define-key map (kbd "RET") #'keemacs-tree-activate)
+    (define-key map (kbd "TAB") #'keemacs-tree-toggle)
+    (define-key map (kbd "C-.") #'embark-act)
+    (define-key map (kbd "g") #'keemacs-tree-refresh)
+    (define-key map (kbd "q") #'quit-window)
+    (define-key map [mouse-1] #'keemacs-tree-click)
+    map)
+  "Keymap for `keemacs-tree-mode'.
+Movement and expansion keys (n, p, M-n, M-p, ^, level keys) are
+inherited from `magit-section-mode-map'.")
+
+(define-derived-mode keemacs-tree-mode magit-section-mode "keemacs-tree"
+  "Major mode for the keemacs tree view buffer.
+The buffer lists the active database as a tree: one collapsible
+section per group, one line per entry.  \\[keemacs-tree-activate] or
+mouse-1 on an entry runs `keemacs-default-action'; on a group it
+toggles the group.  \\[embark-act] opens the action menu for the
+entry at point, \\[keemacs-tree-refresh] reloads the database."
+  (setq-local revert-buffer-function #'keemacs-tree-refresh))
+
+(defun keemacs-tree--format-entry (path entry)
+  "Return the title-only display line for ENTRY at PATH.
+Tagged with `kb-path'; prefixed with the entry's icon (a real
+thumbnail on graphic displays, else the standard icon glyph); the
+title carries `keemacs-title'."
+  (let* ((prefix (keemacs--candidate-prefix path entry))
+         (str (concat prefix
+                      (if (string-empty-p prefix) "" " ")
+                      (propertize (keemacs--field entry "Title")
+                                  'face 'keemacs-title))))
+    (put-text-property 0 (length str) 'kb-path path str)
+    str))
+
+(defun keemacs-tree--build (entries group depth)
+  "Insert tree sections for GROUP (path with trailing \"/\") at DEPTH.
+ENTRIES is the whole database's ((PATH . FIELDS) ...).  Groups come
+before their entries, in the same order `keemacs--group-choose'
+offers them.  magit-section does not indent, so the tree indents
+each level by two spaces."
+  (let ((inhibit-read-only t))
+    (pcase-let* ((`(,groups . ,subentries)
+                  (keemacs--group-contents entries group))
+                 (indent (make-string (* 2 depth) ?\s)))
+      (dolist (g groups)
+        (magit-insert-section (keemacs-tree-group g)
+          (magit-insert-heading (concat indent (keemacs--format-group g)))
+          (keemacs-tree--build entries g (1+ depth))))
+      (dolist (e subentries)
+        (magit-insert-section (keemacs-tree-entry (car e))
+          (insert indent (keemacs-tree--format-entry (car e) (cdr e))
+                  "\n"))))))
+
+(defun keemacs-tree--insert ()
+  "Build the tree sections in the current buffer from the database."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    ;; `magit-insert-section' would make the first top-level section
+    ;; the root; point it at a fresh invisible root instead, so the
+    ;; top level holds real sections only.
+    (setq-local magit-root-section (make-instance 'magit-section :type 'root))
+    (setq-local magit-insert-section--current nil)
+    (setq-local magit-insert-section--oldroot nil)
+    (setq-local magit-insert-section--parent magit-root-section)
+    (let* ((entries (keemacs--load-entries))
+           (root (keemacs--group-contents entries "/")))
+      (if (and (null (car root)) (null (cdr root)))
+          (insert "(empty database)\n")
+        (keemacs-tree--build entries "/" 0)))
+    (goto-char (point-min))))
+
+(defun keemacs-tree-refresh (&rest _)
+  "Reload the database and rebuild the tree.
+Point stays on the entry it was on, or moves to the top when that
+entry no longer exists."
+  (interactive)
+  (let ((path (get-text-property (point) 'kb-path)))
+    (keemacs-tree--insert)
+    (when path
+      (let ((found (text-property-search-forward
+                    'kb-path path (lambda (a b) (equal a b)))))
+        (goto-char (if found
+                       (prop-match-beginning found)
+                     (point-min)))))))
+
+(defun keemacs-tree-toggle ()
+  "Expand or collapse the group section at point."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (if (eq (oref section type) 'keemacs-tree-group)
+        (magit-section-toggle section)
+      (user-error "No group at point"))))
+
+(defun keemacs-tree-activate ()
+  "Act on the tree section at point.
+On an entry: run `keemacs-default-action' -- by default `keemacs-view',
+which replaces this window with the view buffer.  On a group: toggle
+its expansion."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (pcase (oref section type)
+      ('keemacs-tree-entry
+       (keemacs-run-default-action (oref section value)))
+      ('keemacs-tree-group (magit-section-toggle section))
+      (_ (user-error "Nothing at point")))))
+
+(defun keemacs-tree-click (event)
+  "Act on the tree line at the mouse EVENT's position."
+  (interactive "@e")
+  (let ((pos (posn-point (event-start event))))
+    (when (numberp pos)
+      (goto-char pos)
+      (keemacs-tree-activate))))
+
 ;;;###autoload
 (defun keemacs ()
+  "Open the keemacs main screen: the active database as a tree.
+A full-window `keemacs-tree-mode' buffer of the KeePass groups and
+entries.  RET or mouse-1 on an entry runs `keemacs-default-action' (by
+default `keemacs-view'); on a group it toggles the group's expansion.
+`C-.' opens the embark action menu for the entry at point; `g' reloads
+the database."
+  (interactive)
+  (keemacs--require-db)
+  (let ((buf (get-buffer-create "*keemacs-tree*")))
+    (with-current-buffer buf
+      (unless (eq major-mode 'keemacs-tree-mode)
+        (keemacs-tree-mode))
+      (keemacs-tree--insert))
+    (switch-to-buffer buf)
+    (delete-other-windows)))
+
+;;;###autoload
+(defun keemacs-titles ()
   "Select a KeePass entry via consult/vertico minibuffer completion.
 RET runs `keemacs-default-action' (by default `keemacs-view')
 on the selected entry; `C-.' opens `keemacs-action-map' for further
@@ -1768,7 +1926,7 @@ Start from GROUP (default \"/\", the root) and complete over each
 group's children one level at a time -- subgroups and entries -- until
 an entry is chosen; choosing a subgroup descends into it.  When an entry
 is picked, `keemacs-default-action' (by default
-`keemacs-view') runs on it, exactly as with `keemacs'.
+`keemacs-view') runs on it, exactly as with `keemacs-titles'.
 Returns the chosen entry path."
   (interactive)
   (keemacs--require-db)
@@ -2095,7 +2253,7 @@ taken -- the same rule the favorites menus use."
                                     file)))
                         keyed)))
     (pcase (read-multiple-choice "Database: " choices)
-      (`(,key ,name . ,_)
+      (`(,key . ,_)
        (let ((entry (cdr (cdr (seq-find (lambda (ke) (eq (car ke) key))
                                         keyed)))))
          (setq keemacs-database entry)
@@ -2119,11 +2277,13 @@ taken -- the same rule the favorites menus use."
 ;; a package install and for a plain load-path `require' in init.
 (define-prefix-command 'keemacs-command-map)
 
-(define-key keemacs-command-map (kbd "t") #'keemacs)
+;; `k' is the keemacs main screen -- the tree view.
+(define-key keemacs-command-map (kbd "k") #'keemacs)
+(define-key keemacs-command-map (kbd "t") #'keemacs-titles)
 (define-key keemacs-command-map (kbd "g") #'keemacs-group)
 (define-key keemacs-command-map (kbd "d") #'keemacs-select-database)
 (define-key keemacs-command-map (kbd "f") #'keemacs-favorites)
-(define-key keemacs-command-map (kbd "k") #'keemacs-favorites-by-key)
+(define-key keemacs-command-map (kbd "F") #'keemacs-favorites-by-key)
 ;; `f' was taken by the favorites; `c' clears the cached master password.
 (define-key keemacs-command-map (kbd "c") #'keemacs-auth-forget-cached)
 (define-key keemacs-command-map (kbd "a") #'keemacs-add)
