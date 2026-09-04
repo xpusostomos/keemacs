@@ -408,9 +408,11 @@ Four entry points:
   point -- double click to act, it is easy to hit an entry by
   accident.  <kbd>C-.</kbd> (=embark-act=) works anywhere on a row --
   on an entry it opens the full action menu, on a group a menu of
-  group actions (delete the group, add an entry or a subgroup here;
-  both run against the group's own database); =g= reloads the loaded
-  databases.
+  group actions (delete the group, add an entry or a subgroup here),
+  and on a database row a menu of database actions (=u= make it the
+  active database, =l= unlock it by asking for the password, =f=
+  forget its cached password).  The entry and group actions run
+  against the row's own database; =g= reloads the loaded databases.
 
 - <kbd>M-x</kbd> =keemacs-titles= -- select an entry through the
   minibuffer (consult/vertico completion; typing narrows).  RET runs the

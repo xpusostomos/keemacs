@@ -853,7 +853,56 @@ error, leaving the menu open."
       (let ((m (text-property-search-forward 'kb-path "/Work/" #'equal)))
         (goto-char (prop-match-beginning m)))
       (should (equal (cons 'keemacs-tree-group "/Work/")
-                     (keemacs--embark-target))))))
+                     (keemacs--embark-target))))
+    ;; A database row yields the database target -- display label only,
+    ;; and with no database switched as a side effect (making it active
+    ;; is an explicit menu action).
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (setq keemacs-database nil)
+      (should (equal (cons 'keemacs-tree-db "test.kdbx")
+                     (keemacs--embark-target)))
+      (should (null keemacs-database)))))
+
+(ert-deftest keemacs-tree-db-action-map ()
+  "The database embark menu offers the database actions."
+  (should (eq (lookup-key keemacs-tree-db-action-map (kbd "u"))
+              #'keemacs-tree-db-use))
+  (should (eq (lookup-key keemacs-tree-db-action-map (kbd "l"))
+              #'keemacs-tree-db-unlock))
+  (should (eq (lookup-key keemacs-tree-db-action-map (kbd "f"))
+              #'keemacs-tree-db-forget-password))
+  (should (eq (lookup-key keemacs-tree-db-action-map (kbd "RET"))
+              #'keemacs-tree-db-toggle)))
+
+(ert-deftest keemacs-tree-db-use-forget ()
+  "`keemacs-tree-db-use' activates the database at point;
+`keemacs-tree-db-forget-password' drops exactly its cache entry."
+  (let* ((db-a (keemacs-auth-make-db-spec :name "a" :file "/a.kdbx"
+                                          :password nil))
+         (path (expand-file-name "/a.kdbx")))
+    (unwind-protect
+        (with-temp-buffer
+          (keemacs-tree-mode)
+          (setq-local magit-root-section
+                      (make-instance 'magit-section :type 'root))
+          (setq-local magit-insert-section--parent magit-root-section)
+          (let ((keemacs-databases (list db-a))
+                (keemacs-database nil))
+            (cl-letf (((symbol-function 'keemacs--load-entries)
+                       (lambda () nil)))
+              (keemacs-tree--insert)
+              (goto-char (point-min))
+              (setq keemacs-database nil)
+              (keemacs-tree-db-use "a")
+              ;; The db section at point became the active database.
+              (should (equal db-a keemacs-database))
+              ;; Forgetting removes exactly this database's cache entry.
+              (password-cache-add path "pw")
+              (keemacs-tree-db-forget-password "a")
+              (should-not (password-in-cache-p path)))))
+      (password-cache-remove path))))
 
 (ert-deftest keemacs-tree-group-action-map ()
   "The group embark menu offers the group actions."

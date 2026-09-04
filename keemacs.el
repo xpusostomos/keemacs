@@ -1576,24 +1576,31 @@ point."
 The target type depends on the context, so Embark shows the right menu:
 `keemacs-view' in the view buffer (whose menu omits the redundant
 view action), `keemacs' in the listing and tree buffers for entries,
-`keemacs-tree-group' for a tree group, and `keemacs-select' in the
-selection minibuffer (whose menu adds the insert actions, which only
-make sense while the originating buffer's point is preserved)."
+`keemacs-tree-group' for a tree group, `keemacs-tree-db' for a tree
+database, and `keemacs-select' in the selection minibuffer (whose
+menu adds the insert actions, which only make sense while the
+originating buffer's point is preserved)."
   (let (path type)
     (cond
-     ;; In the tree view: the entry or group at point.  A database line
-     ;; carries no `kb-path' and is no target.  Acting on either first
-     ;; selects its own database -- the tree never made one active, and
-     ;; an action against the wrong (or no) database errors out, which
-     ;; leaves the embark menu open.
+     ;; In the tree view: the entry or group at point, or a database
+     ;; row.  Acting on an entry or group first selects its own
+     ;; database -- the tree never made one active, and an action
+     ;; against the wrong (or no) database errors out, which leaves the
+     ;; embark menu open.  A database target carries only its display
+     ;; label; its menu's actions work on the section at point.
      ((derived-mode-p 'keemacs-tree-mode)
       (let ((p (keemacs-tree--line-path)))
-        (when p
+        (cond
+         (p
           (let ((db (keemacs-tree--db-section (magit-current-section))))
             (when db (keemacs-tree--use-db db)))
           (if (string-suffix-p "/" p)
               (setq type 'keemacs-tree-group path p)
-            (setq type 'keemacs path p)))))
+            (setq type 'keemacs path p)))
+         ((eq (oref (magit-current-section) type) 'keemacs-tree-db)
+          (setq type 'keemacs-tree-db
+                path (keemacs--spec-label
+                      (oref (magit-current-section) value)))))))
      ;; In the listing buffer: the entry at point.
      ((derived-mode-p 'keemacs-mode)
       (setq type 'keemacs
@@ -1715,6 +1722,68 @@ group's own database, selected when the target was found.")
              '(keemacs-tree-group . keemacs-tree-group-action-map))
 (add-to-list 'embark-default-action-overrides
              '(keemacs-tree-group . keemacs-tree-group-toggle))
+
+(defconst keemacs-tree-db-actions
+  '(("u" "make active" keemacs-tree-db-use)
+    ("l" "unlock" keemacs-tree-db-unlock)
+    ("f" "forget cached password" keemacs-tree-db-forget-password))
+  "The single source of truth for the database actions offered in the
+tree's embark menu.  Each element is (KEY LABEL FUNCTION); the function
+acts on the database section at point, in its own database's terms --
+the target carries only the display label.")
+
+(defun keemacs-tree--db-at-point ()
+  "Return the database section at point, signalling an error if none."
+  (or (keemacs-tree--db-section (magit-current-section))
+      (user-error "No database at point")))
+
+(defun keemacs-tree-db-toggle (_db)
+  "Toggle the tree database section at point; the menu's default.
+DB is the target's label; the section acted on is the one at point."
+  (interactive "sDatabase: ")
+  (keemacs-tree-toggle))
+
+(defun keemacs-tree-db-use (_db)
+  "Make the database section at point the active one.
+Following commands browse that database."
+  (interactive "sDatabase: ")
+  (keemacs-tree--use-db (keemacs-tree--db-at-point)))
+
+(defun keemacs-tree-db-unlock (_db)
+  "Load the database section at point, prompting for its password.
+On success the tree rebuilds with the database's groups; a password
+typed now is cached, so the database stays readable."
+  (interactive "sDatabase: ")
+  (keemacs-tree--unlock (oref (keemacs-tree--db-at-point) value)))
+
+(defun keemacs-tree-db-forget-password (_db)
+  "Forget the cached master password of the database at point.
+The next read of that database prompts again; the tree keeps showing
+it until the next `keemacs-tree-refresh' locks it."
+  (interactive "sDatabase: ")
+  (let* ((spec (oref (keemacs-tree--db-at-point) value))
+         (label (keemacs--spec-label spec)))
+    (password-cache-remove
+     (expand-file-name
+      (keemacs-auth-db-spec-file (keemacs-auth-db-spec-normalize spec))))
+    (message "Forgot the password for %s" label)))
+
+(defconst keemacs-tree-db-action-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'keemacs-tree-db-toggle)
+    (dolist (entry (reverse keemacs-tree-db-actions))
+      (pcase-let ((`(,key ,_label ,fn) entry))
+        (define-key map (kbd key) fn)))
+    map)
+  "Embark actions for a keemacs tree database target.
+The database acted on is the one at point; making it active and
+unlocking are the interesting ones -- the tree itself loaded the
+databases it could read without prompting.")
+
+(add-to-list 'embark-keymap-alist
+             '(keemacs-tree-db . keemacs-tree-db-action-map))
+(add-to-list 'embark-default-action-overrides
+             '(keemacs-tree-db . keemacs-tree-db-toggle))
 
 (defun keemacs-run-default-action (path)
   "Run `keemacs-default-action' on the entry at PATH.
