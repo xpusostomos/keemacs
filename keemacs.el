@@ -243,6 +243,7 @@ password directly on RET."
     ("o" "copy totp"     keemacs-copy-totp)
     ("v" "view"          keemacs-view)
     ("e" "edit"          keemacs-edit)
+    ("m" "move to group" keemacs-move)
     ("c" "clone"         keemacs-clone)
     ("a" "add"           keemacs-add)
     ("d" "delete"        keemacs-delete))
@@ -1357,25 +1358,38 @@ default; then the new group's name is prompted for.  When invoked from
 
 (defun keemacs-delete-group (&optional group)
   "Delete the KeePass group GROUP.
-GROUP is chosen by completion (the root \"/\" cannot be deleted).
-keepassxc-cli recycles the group: the whole subtree, entries included,
-moves to the Recycle Bin and can be restored from the GUI."
+GROUP is chosen by completion (the root \"/\" cannot be deleted); it
+may also be a list of group paths (the Embark multi-target form) --
+one confirmation covers all of them.  keepassxc-cli recycles the
+groups: the whole subtree, entries included, moves to the Recycle Bin
+and can be restored from the GUI."
   (interactive)
   (keemacs--require-db)
-  (let* ((group (or group
-                    ;; Offer only real groups for deletion -- the root
-                    ;; cannot be deleted.
-                    (completing-read (keemacs--prompt "Delete group: ")
-                                     (keemacs--group-paths)
-                                     nil t)))
-         (group (directory-file-name group)))
-    (when (string-empty-p group)
+  (let* ((groups (mapcar #'directory-file-name
+                         (if (listp group)
+                             group
+                           (list (or group
+                                     ;; Offer only real groups for
+                                     ;; deletion -- the root cannot be
+                                     ;; deleted.
+                                     (completing-read
+                                      (keemacs--prompt "Delete group: ")
+                                      (keemacs--group-paths)
+                                      nil t))))))
+         (groups (cl-remove-if (lambda (g)
+                                 (or (string-empty-p g) (string-equal g "/")))
+                               groups)))
+    (when (null groups)
       (user-error "Cannot delete the root group"))
-    (when (string-prefix-p "/Recycle Bin" group)
-      (user-error "Cannot delete the Recycle Bin"))
-    (when (yes-or-no-p (format "Delete group %s and everything in it (entries go to the Recycle Bin)? " group))
-      (keemacs--run-group-cmd "rmdir" group)
-      (message "Deleted group %s (recycled)" group))))
+    (dolist (g groups)
+      (when (string-prefix-p "/Recycle Bin" g)
+        (user-error "Cannot delete the Recycle Bin")))
+    (when (yes-or-no-p
+           (format "Delete %s (entries go to the Recycle Bin)? "
+                   (string-join groups ", ")))
+      (dolist (g groups)
+        (keemacs--run-group-cmd "rmdir" g)
+        (message "Deleted group %s (recycled)" g)))))
 
 (defun keemacs--entry-choose-group ()
   "Choose the entry's group by completion, replacing the `Group' line.
@@ -1456,10 +1470,63 @@ add/delete."
       (keemacs-auth--error (car run) (keemacs--database-path) (cdr run)))))
 
 (defun keemacs-delete (path)
-  "Delete the entry at PATH, with confirmation."
+  "Delete the entry at PATH, with confirmation.
+PATH may be a list of entry paths (the Embark multi-target form) --
+one confirmation covers all of them."
   (interactive "sEntry path: ")
-  (when (yes-or-no-p (format "Delete entry %s? " path))
-    (keemacs--delete-entry path)))
+  (if (listp path)
+      (when (and path
+                 (yes-or-no-p (format "Delete %d entries? " (length path))))
+        (dolist (p path) (keemacs--delete-entry p)))
+    (when (yes-or-no-p (format "Delete entry %s? " path))
+      (keemacs--delete-entry path))))
+
+(defun keemacs-move (target)
+  "Move the entry at TARGET into a chosen group, keeping its title.
+TARGET is an entry path, or a list of entry paths (the Embark
+multi-target form) -- all of them move into the same group, the group
+choice being the only confirmation.  The move is a `keepassxc-cli mv',
+so entries are never deleted and re-added, and a title containing \"/\"
+moves with the entry intact.  Entries already in the chosen group are
+skipped."
+  (interactive "sEntry path: ")
+  (keemacs--require-db)
+  (let* ((paths (mapcar (lambda (p)
+                          (if (string-prefix-p "/" p) p
+                            (or (keemacs--path-of p) p)))
+                        (if (listp target) target (list target))))
+         (group (keemacs--choose-group))
+         (moves (cl-remove-if
+                 (lambda (move)
+                   (string-equal (keemacs--entry-group (car move)) group))
+                 (mapcar (lambda (p)
+                           ;; The title as it exists now cannot be
+                           ;; derived from the path when it contains
+                           ;; "/" -- fetch it.
+                           (cons p (concat group
+                                           (keemacs--field
+                                            (keemacs--entry-get p)
+                                            "Title"))))
+                         paths))))
+    (when (null moves)
+      (user-error "Already in %s" group))
+    (let ((dbpw (keemacs--db-password))
+          (db (keemacs--database-path)))
+      (dolist (move moves)
+        (let ((run (keemacs--run-stdin dbpw "" "mv" (car move) group)))
+          (unless (eq (cdr run) 0)
+            (keemacs-auth--error (car run) db (cdr run)))))
+      ;; Re-point the view buffer at a moved entry it is showing.
+      (let ((view (get-buffer "*keemacs-view*")))
+        (when view
+          (with-current-buffer view
+            (when-let* ((move (assoc keemacs-view-path moves)))
+              (setq keemacs-view-path (cdr move))
+              (keemacs-view-update nil)))))
+      (message "Moved %s to %s"
+               (mapconcat (lambda (move) (keemacs--entry-basename (car move)))
+                          moves ", ")
+               group))))
 
 (defun keemacs--entry-commit ()
   "Commit the add/clone/edit in the current entry buffer.
@@ -1785,6 +1852,50 @@ databases it could read without prompting.")
 (add-to-list 'embark-default-action-overrides
              '(keemacs-tree-db . keemacs-tree-db-toggle))
 
+;;; Region selection
+;;
+;; C-SPC, then move: magit-section highlights the selected sections, and
+;; `embark-act-all' acts on all of them at once.  Deleting and moving
+;; are multi-target actions, so one prompt covers the whole selection.
+
+(defun keemacs-tree-region-candidates ()
+  "Return the tree's region-selected rows as embark candidates.
+With an active region that is a valid section selection (C-SPC, then
+move) the selection is returned, so `embark-act-all' can act on all of
+it at once -- the same way dired offers its marked files.  The
+selection must be all entries or all groups, from a single database:
+the one the actions will run against, made active here."
+  (when (derived-mode-p 'keemacs-tree-mode)
+    (let* ((sections (or (magit-region-sections 'keemacs-tree-entry)
+                         (magit-region-sections 'keemacs-tree-group)))
+           (dbsecs (and sections
+                        (mapcar #'keemacs-tree--db-section sections)))
+           (specs (mapcar (lambda (s) (oref s value)) dbsecs)))
+      (when (and dbsecs (cl-every #'identity dbsecs)
+                 (= 1 (length (cl-remove-duplicates specs :test #'equal))))
+        (keemacs-tree--use-db (car dbsecs))
+        (cons (if (string-suffix-p "/" (oref (car sections) value))
+                  'keemacs-tree-group
+                'keemacs)
+              (mapcar (lambda (s) (oref s value)) sections))))))
+
+(add-to-list 'embark-candidate-collectors #'keemacs-tree-region-candidates)
+
+;; Deleting and moving work on the whole selection in one go, when the
+;; action is invoked on several candidates at once (`embark-act-all').
+(mapc (lambda (command)
+        (add-to-list 'embark-multitarget-actions command))
+      '(keemacs-move keemacs-delete keemacs-delete-group))
+
+(defun keemacs-tree-act ()
+  "Open an embark menu for the tree row at point.
+With a valid region selection (C-SPC, then move), open
+`embark-act-all' instead, acting on every selected row at once."
+  (interactive)
+  (if (and (region-active-p) (magit-region-sections))
+      (embark-act-all)
+    (embark-act)))
+
 (defun keemacs-run-default-action (path)
   "Run `keemacs-default-action' on the entry at PATH.
 A command wrapper so RET in the action map can invoke whatever function
@@ -1871,7 +1982,9 @@ fields start closed: TAB on an entry reveals them."
     (set-keymap-parent map magit-section-mode-map)
     (define-key map (kbd "RET") #'keemacs-tree-activate)
     (define-key map (kbd "TAB") #'keemacs-tree-toggle)
-    (define-key map (kbd "C-.") #'embark-act)
+    ;; With a region selected this offers `embark-act-all' on every
+    ;; selected row -- move or delete the selection in one go.
+    (define-key map (kbd "C-.") #'keemacs-tree-act)
     (define-key map (kbd "g") #'keemacs-tree-refresh)
     (define-key map (kbd "q") #'quit-window)
     (define-key map [double-mouse-1] #'keemacs-tree-click)
@@ -1891,8 +2004,10 @@ database, one collapsible section per group, one line per entry.
 `keemacs-default-action'; on a group or database it toggles the
 section.  \\[keemacs-tree-toggle] expands and collapses -- on an entry
 it reveals the fields, on the masked password line the password.
-\\[embark-act] opens the action menu for the entry at point,
-\\[keemacs-tree-refresh] reloads the loaded databases."
+\\[keemacs-tree-act] opens the action menu for the entry at point -- or,
+with a region selected (C-SPC, then move), offers acting on every
+selected row at once.  \\[keemacs-tree-refresh] reloads the loaded
+databases."
   (setq-local revert-buffer-function #'keemacs-tree-refresh))
 
 (defun keemacs-tree--format-entry (path entry)

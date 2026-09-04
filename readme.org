@@ -414,6 +414,15 @@ Four entry points:
   forget its cached password).  The entry and group actions run
   against the row's own database; =g= reloads the loaded databases.
 
+Select several rows with <kbd>C-SPC</kbd> and movement -- magit-section
+highlights the selection -- and <kbd>C-.</kbd> then offers acting on
+*all* of them at once: move every selected entry into a group (one
+group prompt), or delete the selection with a single confirmation.
+The selection must be all entries or all groups, from one database.
+Moving is a =keepassxc-cli mv= per entry, so titles -- even ones
+containing =/= -- travel with their entries intact; it is also
+available as the =m= action in every entry menu and the view screen.
+
 - <kbd>M-x</kbd> =keemacs-titles= -- select an entry through the
   minibuffer (consult/vertico completion; typing narrows).  RET runs the
   default action (=keemacs-default-action=, by default *view*);

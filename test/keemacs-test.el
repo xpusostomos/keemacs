@@ -675,7 +675,7 @@ export is `keemacs-test-entries'."
   (should (eq (lookup-key keemacs-tree-mode-map (kbd "TAB"))
               #'keemacs-tree-toggle))
   (should (eq (lookup-key keemacs-tree-mode-map (kbd "C-."))
-              #'embark-act))
+              #'keemacs-tree-act))
   (should (eq (lookup-key keemacs-tree-mode-map (kbd "g"))
               #'keemacs-tree-refresh))
   (should (eq (lookup-key keemacs-tree-mode-map (kbd "q"))
@@ -903,6 +903,110 @@ error, leaving the menu open."
               (keemacs-tree-db-forget-password "a")
               (should-not (password-in-cache-p path)))))
       (password-cache-remove path))))
+
+;;;; Region selection acting
+
+(ert-deftest keemacs-tree-region-candidates ()
+  "A region selection (C-SPC, then move) yields the selected rows as
+candidates -- all entries or all groups, from one database, which is
+made active.  A mixed or cross-database selection yields none."
+  (let ((keemacs-test-entries
+         '(("/A/a" . (("Group" . "/A/") ("Title" . "a")))
+           ("/A/b" . (("Group" . "/A/") ("Title" . "b")))
+           ("/A/b2" . (("Group" . "/A/") ("Title" . "b2")))
+           ("/B/c" . (("Group" . "/B/") ("Title" . "c")))))
+        (keemacs--group-icons
+         '(("/A" . ("48" . nil)) ("/B" . ("48" . nil)))))
+    ;; Two sibling entries: entry candidates.  `region-active-p' signals
+  ;; its way to nil in batch, so it is stubbed -- interactively C-SPC
+  ;; turns it on the normal way.
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m1 (text-property-search-forward 'kb-path "/A/b" #'equal)))
+        (push-mark (prop-match-beginning m1) nil t))
+      (let ((m2 (text-property-search-forward 'kb-path "/A/b2" #'equal)))
+        (should m2)
+        (goto-char (prop-match-beginning m2)))
+      (cl-letf (((symbol-function 'region-active-p) (lambda () t)))
+        (should (equal (cons 'keemacs '("/A/b" "/A/b2"))
+                       (keemacs-tree-region-candidates)))
+        ;; The candidates' database was made active.
+        (should (equal "/test.kdbx"
+                       (keemacs-auth-db-spec-file keemacs-database)))))
+    ;; Two sibling groups: group candidates.
+    (let ((keemacs-test-entries
+           '(("/A/x" . (("Group" . "/A/") ("Title" . "x")))))
+          (keemacs--group-icons
+           '(("/A" . ("48" . nil)) ("/B" . ("48" . nil)))))
+      (keemacs-test-tree-buffer
+        (keemacs-tree--insert)
+        (let ((m1 (text-property-search-forward 'kb-path "/A/" #'equal)))
+          (push-mark (prop-match-beginning m1) nil t))
+        (let ((m2 (text-property-search-forward 'kb-path "/B/" #'equal)))
+          (should m2)
+          (goto-char (prop-match-beginning m2)))
+        (cl-letf (((symbol-function 'region-active-p) (lambda () t)))
+          (should (equal (cons 'keemacs-tree-group '("/A/" "/B/"))
+                         (keemacs-tree-region-candidates))))))))
+
+(ert-deftest keemacs-move-moves-entries ()
+  "`keemacs-move' moves each entry into the chosen group with one
+`keepassxc-cli mv' per entry, keeping its title; entries already in
+the chosen group are skipped.  The group is prompted for once."
+  (let ((keemacs-database
+         (keemacs-auth-make-db-spec :file "/test.kdbx" :password nil))
+        (runs nil)
+        (prompts 0))
+    (cl-letf (((symbol-function 'keemacs--entry-get)
+               (lambda (_) '(("Title" . "github"))))
+              ((symbol-function 'keemacs--choose-group)
+               (lambda () (setq prompts (1+ prompts)) "/Work/"))
+              ((symbol-function 'keemacs--db-password)
+               (lambda () "pw"))
+              ((symbol-function 'keemacs-auth--keepassxc-run-stdin)
+               (lambda (_stdin _pw &rest args)
+                 (setq runs (append runs (list (nthcdr 3 args))))
+                 (cons "" 0))))
+      ;; A single path.
+      (keemacs-move "/personal/github")
+      ;; A multi-target list: one prompt, one mv per entry, and an
+      ;; entry already in the target group is skipped.
+      (keemacs-move '("/a" "/b" "/Work/in-place")))
+    (should (equal '(("mv" "/personal/github" "/Work/")
+                     ("mv" "/a" "/Work/")
+                     ("mv" "/b" "/Work/"))
+                   runs))
+    ;; One prompt per invocation -- even the multi-path one asks once.
+    (should (= 2 prompts))))
+
+(ert-deftest keemacs-delete-multi ()
+  "`keemacs-delete' accepts a list of entry paths: one confirmation,
+all of them deleted."
+  (let ((deleted nil)
+        (confirms 0))
+    (cl-letf (((symbol-function 'keemacs--delete-entry)
+               (lambda (p) (push p deleted)))
+              ((symbol-function 'yes-or-no-p)
+               (lambda (&rest _) (setq confirms (1+ confirms)) t)))
+      (keemacs-delete '("/a" "/b")))
+    (should (equal '("/b" "/a") deleted))
+    (should (= 1 confirms))))
+
+(ert-deftest keemacs-delete-group-multi ()
+  "`keemacs-delete-group' accepts a list of group paths: one
+confirmation, one rmdir per group."
+  (let ((runs nil)
+        (confirms 0))
+    (let ((keemacs-database
+           (keemacs-auth-make-db-spec :file "/test.kdbx" :password nil)))
+      (cl-letf (((symbol-function 'keemacs--run-group-cmd)
+                 (lambda (cmd g) (push (list cmd g) runs)))
+                ((symbol-function 'yes-or-no-p)
+                 (lambda (&rest _) (setq confirms (1+ confirms)) t)))
+        (keemacs-delete-group '("/A/" "/B/"))))
+    (should (equal '(("rmdir" "/B") ("rmdir" "/A")) runs))
+    (should (= 1 confirms))))
 
 (ert-deftest keemacs-tree-group-action-map ()
   "The group embark menu offers the group actions."
