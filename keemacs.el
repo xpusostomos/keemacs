@@ -44,8 +44,8 @@
 ;;
 ;; Entry points:
 ;;   - `keemacs'            the main screen: a full-window tree view of
-;;     the active database (groups and entries; RET or mouse-1 opens an
-;;     entry, `C-.' opens the action menu)
+;;     every configured database (groups and entries; RET or mouse-1
+;;     opens an entry, TAB expands, `C-.' opens the action menu)
 ;;   - `keemacs-titles'     pick an entry through the minibuffer
 ;;     (consult/vertico), then act on it (RET and `C-.' both lead to the
 ;;     action menu)
@@ -1726,8 +1726,19 @@ Press `embark-act' (`C-.') on a row to reach the action menu."
 ;; class only work for magit's own registered types (per its docstring,
 ;; an "undocumented kludge" not available to other packages), so the
 ;; tree declares real subclasses.
+(defclass keemacs-tree-db (magit-section)
+  ((data :initarg :data :initform nil)))
 (defclass keemacs-tree-group (magit-section) ())
 (defclass keemacs-tree-entry (magit-section) ())
+
+(defcustom keemacs-tree-expanded-by-default nil
+  "Whether the tree starts with the groups expanded, entries visible.
+Nil (the default) starts every group closed -- the tree shows each
+database and its top-level group headings only; TAB opens a group.
+Non-nil expands the groups.  Either way an entry's fields start
+closed: TAB on an entry reveals them."
+  :type 'boolean
+  :group 'keemacs)
 
 (defvar keemacs-tree-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1745,11 +1756,12 @@ inherited from `magit-section-mode-map'.")
 
 (define-derived-mode keemacs-tree-mode magit-section-mode "keemacs-tree"
   "Major mode for the keemacs tree view buffer.
-The buffer lists the active database as a tree: one collapsible
-section per group, one line per entry.  \\[keemacs-tree-activate] or
-mouse-1 on an entry runs `keemacs-default-action'; on a group it
-toggles the group.  \\[embark-act] opens the action menu for the
-entry at point, \\[keemacs-tree-refresh] reloads the database."
+The buffer lists every configured database as a tree: one section per
+database, one collapsible section per group, one line per entry.
+\\[keemacs-tree-activate] or mouse-1 on an entry runs
+`keemacs-default-action'; on a group or database it toggles the
+section.  \\[embark-act] opens the action menu for the entry at point,
+\\[keemacs-tree-refresh] reloads the loaded databases."
   (setq-local revert-buffer-function #'keemacs-tree-refresh))
 
 (defun keemacs-tree--format-entry (path entry)
@@ -1765,47 +1777,142 @@ title carries `keemacs-title'."
     (put-text-property 0 (length str) 'kb-path path str)
     str))
 
+(defun keemacs-tree--queryable-p (spec)
+  "Return non-nil if database SPEC can be read without prompting.
+That is the case when it has no master password, or its password is a
+known string or function, or the `:prompt' password it would ask for is
+already in the password cache -- keyed by the expanded database file,
+exactly like `keemacs-auth--read-password'."
+  (let* ((spec (keemacs-auth-db-spec-normalize spec))
+         (password (keemacs-auth-db-spec-password spec)))
+    (cond ((null password) t)
+          ((or (stringp password) (functionp password)) t)
+          (t (password-in-cache-p
+              (expand-file-name (keemacs-auth-db-spec-file spec)))))))
+
+(defun keemacs-tree--load (spec)
+  "Load database SPEC, returning the data its tree section needs.
+This may prompt for the master password through the normal machinery;
+check `keemacs-tree--queryable-p' first when building the default view.
+The result is a plist carrying the entries plus the export globals
+`keemacs--load-entries' publishes, so every database renders from its
+own snapshot no matter how many were loaded since."
+  (let ((keemacs-database spec))
+    (list :label (keemacs--spec-label spec)
+          :entries (keemacs--load-entries)
+          :groups keemacs--group-icons
+          :parents keemacs--entry-parents
+          :custom-icons keemacs--entry-custom-icons
+          :images keemacs--custom-icons)))
+
+(defun keemacs-tree--format-db (spec &optional locked)
+  "Return the heading string for database SPEC.
+LOCKED marks a database whose tree has not been loaded (or could not
+be)."
+  (concat (keemacs--spec-label spec)
+          (when locked
+            (propertize " (locked)" 'face 'shadow))))
+
+(defun keemacs-tree--build-db (data depth)
+  "Insert the tree of database DATA (from `keemacs-tree--load') at DEPTH.
+Each database renders from its own snapshot of the export globals, so
+the databases never see each other's icons or group maps."
+  (let ((keemacs--group-icons (plist-get data :groups))
+        (keemacs--entry-parents (plist-get data :parents))
+        (keemacs--entry-custom-icons (plist-get data :custom-icons))
+        (keemacs--custom-icons (plist-get data :images)))
+    (keemacs-tree--build (plist-get data :entries) "/" depth)))
+
 (defun keemacs-tree--build (entries group depth)
   "Insert tree sections for GROUP (path with trailing \"/\") at DEPTH.
-ENTRIES is the whole database's ((PATH . FIELDS) ...).  Groups come
-before their entries, in the same order `keemacs--group-choose'
-offers them.  magit-section does not indent, so the tree indents
-each level by two spaces."
+ENTRIES is one database's ((PATH . FIELDS) ...).  Groups come before
+their entries, in the same order `keemacs--group-choose' offers them.
+magit-section does not indent, so the tree indents each level by two
+spaces.  Groups start closed unless `keemacs-tree-expanded-by-default';
+entries always do, TAB revealing their fields."
   (let ((inhibit-read-only t))
     (pcase-let* ((`(,groups . ,subentries)
                   (keemacs--group-contents entries group))
-                 (indent (make-string (* 2 depth) ?\s)))
+                 (indent (make-string (* 2 depth) ?\s))
+                 (open keemacs-tree-expanded-by-default))
       (dolist (g groups)
-        (magit-insert-section (keemacs-tree-group g)
+        (magit-insert-section (keemacs-tree-group g (not open))
           (magit-insert-heading (concat indent (keemacs--format-group g)))
           (keemacs-tree--build entries g (1+ depth))))
       (dolist (e subentries)
-        (magit-insert-section (keemacs-tree-entry (car e))
-          (insert indent (keemacs-tree--format-entry (car e) (cdr e))
-                  "\n"))))))
+        (magit-insert-section (keemacs-tree-entry (car e) t)
+          (magit-insert-heading (concat indent
+                                        (keemacs-tree--format-entry
+                                         (car e) (cdr e))))
+          (keemacs-tree--insert-fields (car e) (cdr e)
+                                       (concat indent "  ")))))))
+
+(defun keemacs-tree--insert-fields (path entry indent)
+  "Insert ENTRY at PATH's non-empty fields as lines at INDENT.
+Title, UserName, URL and Notes -- never the password, which the view
+buffer reveals on request.  Each line is tagged with the entry's
+`kb-path', so the action menu works from a field line too.  A
+multi-line Notes value shows its first line only."
+  (dolist (field '("Title" "UserName" "URL" "Notes"))
+    (let ((value (keemacs--field entry field)))
+      (unless (string-empty-p value)
+        (let ((str (concat indent
+                           (propertize
+                            (truncate-string-to-width field 10 nil ?\s)
+                            'face 'keemacs-field-label)
+                           " "
+                           (car (split-string value "\n")))))
+          (put-text-property 0 (length str) 'kb-path path str)
+          (insert str "\n"))))))
 
 (defun keemacs-tree--insert ()
-  "Build the tree sections in the current buffer from the database."
+  "Build the tree sections in the current buffer from the databases.
+The root of the tree is one section per database in
+`keemacs-databases'.  A database that can be read without prompting --
+no master password, or the password known or already cached -- is
+expanded; the others show only their name, marked \"(locked)\", until
+activated, which asks for the password.  Groups start closed and
+entries start with their fields closed; see
+`keemacs-tree-expanded-by-default'."
   (let ((inhibit-read-only t))
     (erase-buffer)
     ;; `magit-insert-section' would make the first top-level section
     ;; the root; point it at a fresh invisible root instead, so the
-    ;; top level holds real sections only.
+    ;; top level holds real sections only.  The old root is kept so
+    ;; every rebuilt section inherits its open/closed state.
     (setq-local magit-root-section (make-instance 'magit-section :type 'root))
     (setq-local magit-insert-section--current nil)
-    (setq-local magit-insert-section--oldroot nil)
     (setq-local magit-insert-section--parent magit-root-section)
-    (let* ((entries (keemacs--load-entries))
-           (root (keemacs--group-contents entries "/")))
-      (if (and (null (car root)) (null (cdr root)))
-          (insert "(empty database)\n")
-        (keemacs-tree--build entries "/" 0)))
+    (setq-local magit-insert-section--oldroot nil)
+    (keemacs--check-databases)
+    (if (null keemacs-databases)
+        (insert "(no databases configured)\n")
+      (dolist (spec keemacs-databases)
+      ;; Load before inserting anything: a failed read (e.g. a stale
+      ;; cached password) leaves no partial section behind, and the
+      ;; database shows as locked instead.
+      (let ((data (and (keemacs-tree--queryable-p spec)
+                       (condition-case err
+                           (keemacs-tree--load spec)
+                         (error
+                          (message "keemacs: %s: %s"
+                                   (keemacs--spec-label spec)
+                                   (error-message-string err))
+                          nil)))))
+        (magit-insert-section (keemacs-tree-db spec nil :data data)
+          (magit-insert-heading (keemacs-tree--format-db spec (null data)))
+          (when data
+            (keemacs-tree--build-db data 1))))))
+    ;; Hidden sections only get their overlay when shown is applied
+    ;; from the root, which recurses into every hidden child.
+    (magit-section-show magit-root-section)
     (goto-char (point-min))))
 
 (defun keemacs-tree-refresh (&rest _)
-  "Reload the database and rebuild the tree.
+  "Reload the loaded databases and rebuild the tree.
 Point stays on the entry it was on, or moves to the top when that
-entry no longer exists."
+entry no longer exists.  Every section keeps its open/closed state
+across the rebuild."
   (interactive)
   (let ((path (get-text-property (point) 'kb-path)))
     (keemacs-tree--insert)
@@ -1817,24 +1924,73 @@ entry no longer exists."
                      (point-min)))))))
 
 (defun keemacs-tree-toggle ()
-  "Expand or collapse the group section at point."
+  "Expand or collapse the section at point.
+A group reveals its entries, an entry its fields, a database its
+groups.  Locked databases cannot be toggled -- activate them instead,
+which loads them first."
   (interactive)
-  (let ((section (magit-current-section)))
-    (if (eq (oref section type) 'keemacs-tree-group)
-        (magit-section-toggle section)
-      (user-error "No group at point"))))
+  (magit-section-toggle (magit-current-section)))
+
+(defun keemacs-tree--db-section (section)
+  "Return the database section SECTION belongs to, or nil.
+Walks up the section's ancestors."
+  (let ((up section))
+    (while (and up (not (eq (oref up type) 'keemacs-tree-db)))
+      (setq up (oref up parent)))
+    (and (eq (oref up type) 'keemacs-tree-db) up)))
+
+(defun keemacs-tree--use-db (section)
+  "Make the database of db SECTION the active one.
+The entry actions all run against the active database, so activating a
+tree entry first selects its own database -- and reinstates that
+database's export state, since the tree loaded each database
+separately."
+  (let* ((spec (oref section value))
+         (switched (not (equal spec keemacs-database)))
+         (data (oref section data)))
+    (setq keemacs-database spec)
+    (setq keemacs--group-icons (plist-get data :groups)
+          keemacs--entry-parents (plist-get data :parents)
+          keemacs--entry-custom-icons (plist-get data :custom-icons)
+          keemacs--custom-icons (plist-get data :images))
+    (when switched
+      (message "Using KeePass database %s" (keemacs--spec-label spec)))))
+
+(defun keemacs-tree--unlock (spec)
+  "Load locked database SPEC, prompting for its master password.
+On success the tree is rebuilt -- the password is cached then, so SPEC
+appears with its groups -- and point moves to its section."
+  (condition-case err
+      (keemacs-tree--load spec)
+    (error (user-error "keemacs: %s: %s" (keemacs--spec-label spec)
+                       (error-message-string err))))
+  (keemacs-tree-refresh)
+  (let ((section (seq-find (lambda (s)
+                             (and (eq (oref s type) 'keemacs-tree-db)
+                                  (equal (oref s value) spec)))
+                           (oref magit-root-section children))))
+    (when section
+      (goto-char (oref section start))
+      (magit-section-show section))))
 
 (defun keemacs-tree-activate ()
   "Act on the tree section at point.
 On an entry: run `keemacs-default-action' -- by default `keemacs-view',
-which replaces this window with the view buffer.  On a group: toggle
-its expansion."
+which replaces this window with the view buffer -- on the entry's own
+database, making it the active one.  On a group: toggle its expansion.
+On a database: toggle it too, unless it is locked, in which case it is
+loaded first (prompting for the master password)."
   (interactive)
   (let ((section (magit-current-section)))
     (pcase (oref section type)
       ('keemacs-tree-entry
+       (keemacs-tree--use-db (keemacs-tree--db-section section))
        (keemacs-run-default-action (oref section value)))
       ('keemacs-tree-group (magit-section-toggle section))
+      ('keemacs-tree-db
+       (if (oref section children)
+           (magit-section-toggle section)
+         (keemacs-tree--unlock (oref section value))))
       (_ (user-error "Nothing at point")))))
 
 (defun keemacs-tree-click (event)
@@ -1847,14 +2003,22 @@ its expansion."
 
 ;;;###autoload
 (defun keemacs ()
-  "Open the keemacs main screen: the active database as a tree.
-A full-window `keemacs-tree-mode' buffer of the KeePass groups and
-entries.  RET or mouse-1 on an entry runs `keemacs-default-action' (by
-default `keemacs-view'); on a group it toggles the group's expansion.
-`C-.' opens the embark action menu for the entry at point; `g' reloads
-the database."
+  "Open the keemacs main screen: every configured database as a tree.
+A full-window `keemacs-tree-mode' buffer with one section per database
+in `keemacs-databases', its groups beneath it.  A database that can be
+read without prompting -- no master password, or the password known or
+already cached -- is loaded and shown with its groups closed
+(`keemacs-tree-expanded-by-default' opens them); the rest are marked
+\"(locked)\" and load, prompting, when activated.  RET or mouse-1 on an
+entry runs `keemacs-default-action' (by default `keemacs-view') on the
+entry's own database, making it the active one; on a group or database
+it toggles expansion.  TAB toggles too -- on an entry it reveals the
+fields.  `C-.' opens the embark action menu for the entry at point;
+`g' reloads the loaded databases."
   (interactive)
-  (keemacs--require-db)
+  (keemacs--check-databases)
+  (unless keemacs-databases
+    (user-error "`keemacs-databases' is empty -- add your databases first"))
   (let ((buf (get-buffer-create "*keemacs-tree*")))
     (with-current-buffer buf
       (unless (eq major-mode 'keemacs-tree-mode)

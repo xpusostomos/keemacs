@@ -380,20 +380,28 @@ non-nil to be asked on every command instead -- <kbd>M-x</kbd>
 =keemacs-favorites-by-key= then asks through the hotkey menu, the
 other commands through the completion list.  With exactly one
 configured database there is nothing to choose, so it is picked
-automatically either way.
+automatically either way.  The main screen (=keemacs=) sidesteps the
+question entirely: it shows every configured database at once.
 
 *** Using keemacs
 
 Four entry points:
 
 - <kbd>M-x</kbd> =keemacs= -- the *main screen*: a full-window tree
-  of the active database, one collapsible section per group, one line
-  per entry (title only, with the entry's icon).  <kbd>RET</kbd> or
-  mouse-1 on an entry runs the default action
-  (=keemacs-default-action=, by default *view*); on a group it expands
-  or collapses it (<kbd>TAB</kbd> does the same).  <kbd>C-.</kbd>
-  (=embark-act=) opens the full action menu for the entry at point;
-  =g= reloads the database.
+  whose root is one section per configured database, with its groups
+  and entries beneath it.  A database that can be read without
+  prompting -- no master password, or the password known or already
+  cached -- is loaded and shown with its groups *closed*; the rest are
+  marked =(locked)= and load, asking for the password, when you
+  activate them.  =keemacs-tree-expanded-by-default= opens the groups
+  from the start.  <kbd>RET</kbd> or mouse-1 on an entry runs the
+  default action (=keemacs-default-action=, by default *view*) on that
+  entry's own database, making it the active one; on a group or
+  database it expands or collapses it (<kbd>TAB</kbd> does the same --
+  on an entry it reveals the entry's title, username, URL and notes
+  right in the tree).  <kbd>C-.</kbd> (=embark-act=) opens the full
+  action menu for the entry at point; =g= reloads the loaded
+  databases.
 
 - <kbd>M-x</kbd> =keemacs-titles= -- select an entry through the
   minibuffer (consult/vertico completion; typing narrows).  RET runs the

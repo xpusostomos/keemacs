@@ -50,7 +50,8 @@
   "Bind a fresh test DB and run BODY with it set as the active database."
   `(when keemacs-test-program
      (let* ((db (keemacs-test-make-db))
-            (keemacs-database (keemacs-auth-make-db-spec :file db))
+            (keemacs-databases (list (keemacs-auth-make-db-spec :file db)))
+            (keemacs-database (car keemacs-databases))
             (password-cache-expiry nil))
        (password-cache-add db "PASS")
        (unwind-protect
@@ -651,15 +652,21 @@ on the chosen entry."
 (defmacro keemacs-test-tree-buffer (&rest body)
   "Build the tree from the stubbed export in a temp buffer and run BODY.
 Sets the tree mode up with a fresh root section, as
-`keemacs-tree--insert' would."
+`keemacs-tree--insert' would, and one queryable test database whose
+export is `keemacs-test-entries'."
   (declare (indent 0))
   `(with-temp-buffer
      (keemacs-tree-mode)
      (setq-local magit-root-section (make-instance 'magit-section :type 'root))
      (setq-local magit-insert-section--parent magit-root-section)
-     (cl-letf (((symbol-function 'keemacs--load-entries)
-                (lambda () keemacs-test-entries)))
-       ,@body)))
+     (let ((keemacs-databases
+            (list (keemacs-auth-make-db-spec :file "/test.kdbx"
+                                             :password nil)))
+           (keemacs-database
+            (keemacs-auth-make-db-spec :file "/test.kdbx" :password nil)))
+       (cl-letf (((symbol-function 'keemacs--load-entries)
+                  (lambda () keemacs-test-entries)))
+         ,@body))))
 
 (ert-deftest keemacs-tree-mode-keymap ()
   "The tree mode binds the tree commands and inherits magit-section's."
@@ -729,8 +736,9 @@ childless sections carrying the entry path."
 
 (ert-deftest keemacs-tree-insert-tags-lines ()
   "`keemacs-tree--insert' tags entry lines with the entry path and
-group headings with the group path (trailing slash).  An empty
-database gets a placeholder instead of a blank buffer."
+group headings with the group path (trailing slash).  A loaded but
+empty database shows just its name; with no databases the buffer says
+so instead of being blank."
   (let ((keemacs-test-entries
          '(("/email" . (("Group" . "/") ("Title" . "email")))
            ("/Work/github" . (("Group" . "/Work/")
@@ -738,6 +746,8 @@ database gets a placeholder instead of a blank buffer."
         (keemacs--group-icons '(("/Work" . ("48" . nil)))))
     (keemacs-test-tree-buffer
       (keemacs-tree--insert)
+      ;; The database's own heading sits above its tree.
+      (should (string-match-p "test.kdbx" (buffer-string)))
       (should (string-match-p "Work/" (buffer-string)))
       (goto-char (point-min))
       (let ((m (text-property-search-forward 'kb-path "/Work/github"
@@ -752,7 +762,19 @@ database gets a placeholder instead of a blank buffer."
         (keemacs--group-icons nil))
     (keemacs-test-tree-buffer
       (keemacs-tree--insert)
-      (should (string-match-p "(empty database)" (buffer-string))))))
+      ;; Loaded but empty: the database heading with nothing under it.
+      (should (string-match-p "test.kdbx" (buffer-string)))))
+  ;; No databases at all: the placeholder.
+  (with-temp-buffer
+    (keemacs-tree-mode)
+    (setq-local magit-root-section (make-instance 'magit-section :type 'root))
+    (setq-local magit-insert-section--parent magit-root-section)
+    (let ((keemacs-databases nil)
+          (keemacs-database nil))
+      (cl-letf (((symbol-function 'keemacs--load-entries) (lambda () nil)))
+        (keemacs-tree--insert)
+        (should (string-match-p "(no databases configured)"
+                                (buffer-string)))))))
 
 (ert-deftest keemacs-tree-activate-entry-runs-default-action ()
   "RET (activate) on an entry runs the default action on its path."
@@ -781,10 +803,12 @@ database gets a placeholder instead of a blank buffer."
         (goto-char (prop-match-beginning m)))
       (let ((section (magit-current-section)))
         (should (eq 'keemacs-tree-group (oref section type)))
-        (keemacs-tree-activate)
+        ;; Groups start closed: the first activate opens it.
         (should (oref section hidden))
         (keemacs-tree-activate)
-        (should-not (oref section hidden))))))
+        (should-not (oref section hidden))
+        (keemacs-tree-activate)
+        (should (oref section hidden))))))
 
 (ert-deftest keemacs-tree-embark-target ()
   "The embark finder yields the entry at point and ignores group lines."
@@ -829,9 +853,172 @@ database gets a placeholder instead of a blank buffer."
     (keemacs-tree-mode)
     (should buffer-read-only)))
 
+(ert-deftest keemacs-tree-queryable-p ()
+  "`keemacs-tree--queryable-p' says which databases load silently."
+  (should (keemacs-tree--queryable-p '(:file "/a.kdbx" :password nil)))
+  (should (keemacs-tree--queryable-p '(:file "/a.kdbx" :password "pw")))
+  (should (keemacs-tree--queryable-p
+           '(:file "/a.kdbx" :password (lambda () "pw"))))
+  ;; Omitted :password means :prompt -- only queryable when cached.
+  (should-not (keemacs-tree--queryable-p '(:file "/a.kdbx")))
+  (password-cache-add (expand-file-name "/a.kdbx") "pw")
+  (should (keemacs-tree--queryable-p '(:file "/a.kdbx")))
+  (password-cache-remove (expand-file-name "/a.kdbx")))
+
+(ert-deftest keemacs-tree-databases-as-root ()
+  "The tree's root level is one section per configured database.
+A queryable one shows its entries; a locked one only a marker."
+  (let* ((db-a (keemacs-auth-make-db-spec :name "a" :file "/a.kdbx"
+                                          :password nil))
+         (db-b (keemacs-auth-make-db-spec :name "b" :file "/b.kdbx"))
+         (keemacs-test-entries
+          '(("/x" . (("Group" . "/") ("Title" . "x")))))
+         (keemacs--group-icons nil)
+         (loaded-from nil))
+    (with-temp-buffer
+      (keemacs-tree-mode)
+      (setq-local magit-root-section
+                  (make-instance 'magit-section :type 'root))
+      (setq-local magit-insert-section--parent magit-root-section)
+      (let ((keemacs-databases (list db-a db-b)))
+        (cl-letf (((symbol-function 'keemacs--load-entries)
+                   (lambda ()
+                     (setq loaded-from
+                           (keemacs-auth-db-spec-file keemacs-database))
+                     keemacs-test-entries)))
+          (keemacs-tree--insert)
+          (let ((top (oref magit-root-section children)))
+            (should (= 2 (length top)))
+            (should (eq 'keemacs-tree-db (oref (nth 0 top) type)))
+            (should (equal db-a (oref (nth 0 top) value)))
+            ;; Database a was loaded (its password is nil) and shows x.
+            (should (equal "/a.kdbx" loaded-from))
+            (should (= 1 (length (oref (nth 0 top) children))))
+            ;; Database b is locked: no children, a marked heading.
+            (should (null (oref (nth 1 top) children)))
+            (should (string-match-p "b (locked)" (buffer-string)))))))))
+
+(ert-deftest keemacs-tree-expanded-by-default ()
+  "`keemacs-tree-expanded-by-default' opens the groups at build time."
+  (let ((keemacs-test-entries
+         '(("/g/x" . (("Group" . "/g/") ("Title" . "x")))))
+        (keemacs--group-icons '(("/g" . ("48" . nil)))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (let ((group (car (oref (car (oref magit-root-section children))
+                              children))))
+        (should (eq 'keemacs-tree-group (oref group type)))
+        ;; Closed by default: the entry under it is invisible.
+        (should (oref group hidden))
+        (goto-char (oref group content))
+        (should (invisible-p (point)))))
+    (let ((keemacs-tree-expanded-by-default t))
+      (keemacs-test-tree-buffer
+        (keemacs-tree--insert)
+        (should (string-match-p "x" (buffer-string)))
+        (let ((group (car (oref (car (oref magit-root-section children))
+                                children))))
+          (should-not (oref group hidden)))))))
+
+(ert-deftest keemacs-tree-entry-fields-hidden-until-tab ()
+  "An entry's fields are child lines, revealed by toggling; the
+password is never among them."
+  (let ((keemacs-test-entries
+         '(("/x" . (("Group" . "/") ("Title" . "x") ("UserName" . "u")
+                    ("URL" . "https://e") ("Notes" . "n")
+                    ("Password" . "secret")))))
+        (keemacs--group-icons nil))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/x" #'equal)))
+        (goto-char (prop-match-beginning m)))
+      (let ((entry (magit-current-section)))
+        (should (eq 'keemacs-tree-entry (oref entry type)))
+        (should (oref entry hidden))
+        ;; The field text exists, but is invisible until toggled.
+        (should (string-match-p "UserName" (buffer-string)))
+        (goto-char (oref entry content))
+        (should (invisible-p (point)))
+        (keemacs-tree-toggle)
+        (should-not (oref entry hidden))
+        (should-not (invisible-p (point)))
+        ;; Field lines are tagged so embark works from them too.
+        (goto-char (oref entry content))
+        (should (equal "/x" (get-text-property (point) 'kb-path)))
+        ;; No password line, ever.
+        (should-not (string-match-p "Password" (buffer-string)))
+        (should-not (string-match-p "secret" (buffer-string)))))))
+
+(ert-deftest keemacs-tree-unlock-opens-database ()
+  "Activating a locked database loads it (prompting) and shows its tree."
+  (let* ((db-b (keemacs-auth-make-db-spec :name "b" :file "/b.kdbx"))
+         (keemacs-test-entries
+          '(("/x" . (("Group" . "/") ("Title" . "x")))))
+         (keemacs--group-icons nil)
+         (loads 0)
+         (path (expand-file-name "/b.kdbx")))
+    (unwind-protect
+        (with-temp-buffer
+          (keemacs-tree-mode)
+          (setq-local magit-root-section
+                      (make-instance 'magit-section :type 'root))
+          (setq-local magit-insert-section--parent magit-root-section)
+          (let ((keemacs-databases (list db-b))
+                (keemacs-database nil))
+            (cl-letf (((symbol-function 'keemacs--load-entries)
+                       (lambda ()
+                         (setq loads (1+ loads))
+                         ;; The real loader caches the typed password;
+                         ;; mimic that so the database turns queryable.
+                         (password-cache-add path "pw")
+                         keemacs-test-entries)))
+              (keemacs-tree--insert)
+              (should (= 0 loads))      ; locked: not loaded eagerly
+              (goto-char (point-min))
+              (keemacs-tree-activate)   ; the locked db line
+              (should (>= loads 1))
+              ;; After the unlock the tree shows the database's entries.
+              (should (string-match-p "x" (buffer-string)))
+              (let ((top (oref magit-root-section children)))
+                (should (= 1 (length (oref (car top) children))))))))
+      (password-cache-remove path))))
+
+(ert-deftest keemacs-tree-activate-switches-database ()
+  "Activating an entry makes its own database the active one."
+  (let* ((db-a (keemacs-auth-make-db-spec :file "/a.kdbx" :password nil))
+         (db-b (keemacs-auth-make-db-spec :file "/b.kdbx" :password nil))
+         (keemacs-test-entries
+          '(("/x" . (("Group" . "/") ("Title" . "x")))))
+         (action-box (list nil))
+         (keemacs-default-action (lambda (p) (setcar action-box p))))
+    (with-temp-buffer
+      (keemacs-tree-mode)
+      (setq-local magit-root-section
+                  (make-instance 'magit-section :type 'root))
+      (setq-local magit-insert-section--parent magit-root-section)
+      (let ((keemacs-databases (list db-a db-b))
+            (keemacs-database db-a))
+        (cl-letf (((symbol-function 'keemacs--load-entries)
+                   (lambda ()
+                     ;; Only database b has the entry.
+                     (and (equal (keemacs-auth-db-spec-file
+                                  keemacs-database)
+                                 "/b.kdbx")
+                          keemacs-test-entries))))
+          (keemacs-tree--insert)
+          (goto-char (point-min))
+          (let ((m (text-property-search-forward 'kb-path "/x" #'equal)))
+            (should m)
+            (goto-char (prop-match-beginning m))
+            (keemacs-tree-activate))
+          (should (equal db-b keemacs-database))
+          (should (equal "/x" (car action-box))))))))
+
 (ert-deftest keemacs-tree-command-opens-full-window ()
   "M-x keemacs opens the full-window tree buffer."
-  (let ((keemacs-database (keemacs-auth-make-db-spec :file "/x.kdbx"))
+  (let ((keemacs-databases
+         (list (keemacs-auth-make-db-spec :file "/x.kdbx" :password nil)))
         (keemacs-test-entries
          '(("/email" . (("Group" . "/") ("Title" . "email"))))))
     (unwind-protect
@@ -844,6 +1031,7 @@ database gets a placeholder instead of a blank buffer."
         (should buf)
         (with-current-buffer buf
           (should (eq major-mode 'keemacs-tree-mode))
+          (should (string-match-p "x.kdbx" (buffer-string)))
           (should (string-match-p "email" (buffer-string))))
         (kill-buffer buf)))))
 
