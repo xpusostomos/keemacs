@@ -395,17 +395,18 @@ Four entry points:
   on one asks for the password and expands it.  Which databases start
   with their groups open is up to =keemacs-tree-expand-databases=:
   =all= opens every queryable database, =current= just the active one,
-  =none= (the default) starts everything closed.  <kbd>RET</kbd> or
-  mouse-1 on an entry runs the default action
+  =none= (the default) starts everything closed.  <kbd>RET</kbd> or a
+  double click on an entry runs the default action
   (=keemacs-default-action=, by default *view*) on that entry's own
   database, making it the active one; on a group or database it
   expands or collapses it (<kbd>TAB</kbd> does the same -- on an entry
   it reveals the entry's title, username, URL and notes right in the
   tree, with the password masked as =******=; <kbd>TAB</kbd> on the
   masked line reveals the real password as a sub-line, and collapsing
-  anything conceals it again).  <kbd>C-.</kbd> (=embark-act=) opens the
-  full action menu for the entry at point; =g= reloads the loaded
-  databases.
+  anything conceals it again).  A single click only moves point --
+  double click to act, it is easy to hit an entry by accident.
+  <kbd>C-.</kbd> (=embark-act=) opens the full action menu for the
+  entry at point; =g= reloads the loaded databases.
 
 - <kbd>M-x</kbd> =keemacs-titles= -- select an entry through the
   minibuffer (consult/vertico completion; typing narrows).  RET runs the

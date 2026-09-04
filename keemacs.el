@@ -44,9 +44,9 @@
 ;;
 ;; Entry points:
 ;;   - `keemacs'            the main screen: a tree view of every
-;;     configured database (groups and entries; RET or mouse-1 opens an
-;;     entry, TAB expands -- groups, fields and passwords, `C-.' opens
-;;     the action menu)
+;;     configured database (groups and entries; RET or a double click
+;;     opens an entry, TAB expands -- groups, fields and passwords,
+;;     `C-.' opens the action menu)
 ;;   - `keemacs-titles'     pick an entry through the minibuffer
 ;;     (consult/vertico), then act on it (RET and `C-.' both lead to the
 ;;     action menu)
@@ -1567,10 +1567,15 @@ is preserved)."
     (cond
      ;; In the tree view: the entry at point.  Group lines carry a
      ;; trailing slash and are deliberately no target -- entry actions
-     ;; on a group path are meaningless.
+     ;; on a group path are meaningless.  Acting on an entry first
+     ;; selects its own database -- the tree never made one active, and
+     ;; an action against the wrong (or no) database errors out, which
+     ;; leaves the embark menu open.
      ((derived-mode-p 'keemacs-tree-mode)
       (let ((p (get-text-property (point) 'kb-path)))
         (unless (or (null p) (string-suffix-p "/" p))
+          (let ((db (keemacs-tree--db-section (magit-current-section))))
+            (when db (keemacs-tree--use-db db)))
           (setq type 'keemacs path p))))
      ;; In the listing buffer: the entry at point.
      ((derived-mode-p 'keemacs-mode)
@@ -1752,17 +1757,20 @@ fields start closed: TAB on an entry reveals them."
     (define-key map (kbd "C-.") #'embark-act)
     (define-key map (kbd "g") #'keemacs-tree-refresh)
     (define-key map (kbd "q") #'quit-window)
-    (define-key map [mouse-1] #'keemacs-tree-click)
+    (define-key map [double-mouse-1] #'keemacs-tree-click)
     map)
   "Keymap for `keemacs-tree-mode'.
 Movement and expansion keys (n, p, M-n, M-p, ^, level keys) are
-inherited from `magit-section-mode-map'.")
+inherited from `magit-section-mode-map'.  A single click only moves
+point; a double click acts on the item (open an entry, toggle a group
+or database) -- group and database headings also toggle via magit's
+own heading bindings.")
 
 (define-derived-mode keemacs-tree-mode magit-section-mode "keemacs-tree"
   "Major mode for the keemacs tree view buffer.
 The buffer lists every configured database as a tree: one section per
 database, one collapsible section per group, one line per entry.
-\\[keemacs-tree-activate] or mouse-1 on an entry runs
+\\[keemacs-tree-activate] or a double click on an entry runs
 `keemacs-default-action'; on a group or database it toggles the
 section.  \\[keemacs-tree-toggle] expands and collapses -- on an entry
 it reveals the fields, on the masked password line the password.
@@ -1862,12 +1870,19 @@ start closed, TAB revealing their fields."
           (magit-insert-heading (concat indent (keemacs--format-group g)))
           (keemacs-tree--build entries g (1+ depth) open)))
       (dolist (e subentries)
-        (magit-insert-section (keemacs-tree-entry (car e) t)
-          (magit-insert-heading (concat indent
-                                        (keemacs-tree--format-entry
-                                         (car e) (cdr e))))
-          (keemacs-tree--insert-fields (car e) (cdr e)
-                                       (concat indent "  ")))))))
+        (let ((sec (magit-insert-section (keemacs-tree-entry (car e) t)
+                     (magit-insert-heading (concat indent
+                                                   (keemacs-tree--format-entry
+                                                    (car e) (cdr e))))
+                     (keemacs-tree--insert-fields (car e) (cdr e)
+                                                  (concat indent "  ")))))
+          ;; A double click on an entry means "open it", not "toggle
+          ;; its fields" -- drop magit's heading keymap (which would
+          ;; toggle) so the mode's binding applies.  Group and database
+          ;; headings keep it; there a toggle is exactly what a click
+          ;; means.
+          (remove-text-properties (oref sec start) (oref sec content)
+                                  '(keymap nil)))))))
 
 (defun keemacs-tree--insert-fields (path entry indent)
   "Insert ENTRY at PATH's non-empty fields as lines at INDENT.
@@ -2102,7 +2117,8 @@ is concealed before anything is toggled or opened."
       (_ (user-error "Nothing at point")))))
 
 (defun keemacs-tree-click (event)
-  "Act on the tree line at the mouse EVENT's position."
+  "Act on the tree line at the double click EVENT's position.
+Single clicks only move point -- acting on them proved too sensitive."
   (interactive "@e")
   (let ((pos (posn-point (event-start event))))
     (when (numberp pos)
@@ -2118,10 +2134,10 @@ it.  A database that can be read without prompting -- no master
 password, or the password known or already cached -- is loaded; the
 rest are marked \"(locked)\" and load, prompting, when expanded.  The
 groups start closed, opened, or only the active database's do, per
-`keemacs-tree-expand-databases'.  RET or mouse-1 on an entry runs
-`keemacs-default-action' (by default `keemacs-view') on the entry's
-own database, making it the active one; on a group or database it
-toggles expansion.  TAB toggles too -- on an entry it reveals the
+`keemacs-tree-expand-databases'.  RET or a double click on an entry
+runs `keemacs-default-action' (by default `keemacs-view') on the
+entry's own database, making it the active one; on a group or database
+it toggles expansion.  TAB toggles too -- on an entry it reveals the
 fields, on the masked password line the password itself.  `C-.' opens
 the embark action menu for the entry at point; `g' reloads the loaded
 databases."

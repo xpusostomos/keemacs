@@ -680,6 +680,11 @@ export is `keemacs-test-entries'."
               #'keemacs-tree-refresh))
   (should (eq (lookup-key keemacs-tree-mode-map (kbd "q"))
               #'quit-window))
+  ;; A double click acts; a single click is left at point's default.
+  (should (eq (lookup-key keemacs-tree-mode-map [double-mouse-1])
+              #'keemacs-tree-click))
+  (should-not (eq (lookup-key keemacs-tree-mode-map [mouse-1])
+                  #'keemacs-tree-click))
   ;; Inherited from `magit-section-mode-map'.
   (should (eq (lookup-key keemacs-tree-mode-map (kbd "n"))
               #'magit-section-forward))
@@ -811,7 +816,10 @@ so instead of being blank."
         (should (oref section hidden))))))
 
 (ert-deftest keemacs-tree-embark-target ()
-  "The embark finder yields the entry at point and ignores group lines."
+  "The embark finder yields the entry at point, ignores group lines,
+and selects the entry's own database first -- otherwise the action
+would run against whatever database is active (possibly none) and
+error, leaving the menu open."
   (let ((keemacs-test-entries
          '(("/email" . (("Group" . "/") ("Title" . "email")))
            ("/Work/github" . (("Group" . "/Work/")
@@ -823,14 +831,38 @@ so instead of being blank."
       (let ((m (text-property-search-forward 'kb-path "/Work/github"
                                              #'equal)))
         (goto-char (+ (prop-match-beginning m) 2)))
+      (setq keemacs-database nil)   ; the tree leaves no active database
       (should (equal (cons 'keemacs "/Work/github")
-                     (keemacs--embark-target))))
+                     (keemacs--embark-target)))
+      ;; The finder made the entry's database active.
+      (should (equal "/test.kdbx"
+                     (keemacs-auth-db-spec-file keemacs-database))))
     (keemacs-test-tree-buffer
       (keemacs-tree--insert)
       (goto-char (point-min))
       (let ((m (text-property-search-forward 'kb-path "/Work/" #'equal)))
         (goto-char (prop-match-beginning m)))
       (should-not (keemacs--embark-target)))))
+
+(ert-deftest keemacs-tree-entry-heading-not-toggleable ()
+  "Entry headings carry no magit heading keymap, so a double click
+falls through to the mode's binding (open the entry); group headings
+keep theirs, where toggling is what a click means."
+  (let ((keemacs-test-entries
+         '(("/email" . (("Group" . "/") ("Title" . "email")))
+           ("/Work/github" . (("Group" . "/Work/")
+                              ("Title" . "github")))))
+        (keemacs--group-icons '(("/Work" . ("48" . nil)))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/Work/" #'equal)))
+        (should (get-text-property (prop-match-beginning m) 'keymap)))
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/Work/github"
+                                             #'equal)))
+        (should-not (get-text-property (prop-match-beginning m)
+                                       'keymap))))))
 
 (ert-deftest keemacs-tree-refresh-keeps-point ()
   "`keemacs-tree-refresh' rebuilds and keeps point on its entry."
