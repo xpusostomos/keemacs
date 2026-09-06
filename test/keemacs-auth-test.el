@@ -542,6 +542,24 @@ database with no master password, while omission means `:prompt'."
       (advice-remove 'auth-source-remember
                      #'keemacs-auth--remember-advice))))
 
+(ert-deftest keemacs-auth-enable-idempotent ()
+  "Calling `keemacs-auth-enable' twice installs the advice once and
+does not error.  The second call used to crash with
+\"wrong-type-argument listp\": `advice-member-p' returns the installed
+advice's flist, not a list, and the old idempotence check fed it to
+`memq'."
+  (skip-unless (executable-find "keepassxc-cli"))
+  (unwind-protect
+      (progn
+        (keemacs-auth-enable)
+        (should (advice-member-p #'keemacs-auth--remember-advice
+                                 'auth-source-remember))
+        (keemacs-auth-enable)
+        (should (advice-member-p #'keemacs-auth--remember-advice
+                                 'auth-source-remember)))
+    (advice-remove 'auth-source-remember
+                   #'keemacs-auth--remember-advice)))
+
 (ert-deftest keemacs-auth-multi-db-separate-caches ()
   "Multiple databases each answer their own queries, each master
 password is cached separately, and entries with portless URLs are found

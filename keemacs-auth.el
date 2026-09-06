@@ -841,9 +841,10 @@ Also installs advice suppressing `auth-source' negative caching when
           (auth-source-forget-all-cached)
           ;; Make `auth-source-remember' skip empty results, unless already
           ;; installed (idempotent across repeated calls to `enable').
-          (unless (memq #'keemacs-auth--remember-advice
-                        (advice-member-p #'keemacs-auth--remember-advice
-                                         'auth-source-remember))
+          ;; `advice-member-p' returns the installed advice's flist --
+          ;; not a list -- so it is used directly as the predicate.
+          (unless (advice-member-p #'keemacs-auth--remember-advice
+                                   'auth-source-remember)
             (advice-add 'auth-source-remember :around
                         #'keemacs-auth--remember-advice))
           (if (boundp 'auth-source-backend-parser-functions)
