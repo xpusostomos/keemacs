@@ -81,11 +81,13 @@
   :prefix "keemacs-")
 
 (defface keemacs-title
-  '((t :inherit default))
+  '((t))
   "Face for the Title column in candidate lines.
-Inherits the default face, so the title follows the user's theme
-(white-on-dark, black-on-light); customize it to give titles their
-own color."
+Deliberately empty: unspecified attributes render with the default
+face's colors, so the title follows the user's theme -- but the face
+sets no background of its own, which would defeat vertico's
+highlighting of the selected candidate.  Customize it to give titles
+their own color."
   :group 'keemacs)
 
 (defface keemacs-field-label
@@ -883,6 +885,18 @@ space up to the next column."
   (let* ((prefix (keemacs--candidate-prefix path entry))
          (expired (keemacs--entry-expired-p entry))
          (mark (and expired (if (string-empty-p prefix) "❌ " " ❌")))
+         ;; Everything before the first column, and the width the ❌
+         ;; mark adds to it: the expired title column gives that width
+         ;; back, so the following columns stay aligned across rows.
+         (lead (concat prefix mark
+                       (when (not (string-empty-p prefix)) " ")))
+         (lead-base (string-width (concat prefix
+                                          (when (not (string-empty-p prefix))
+                                            " "))))
+         (title-width (if expired
+                          (- keemacs-title-width
+                             (- (string-width lead) lead-base))
+                        keemacs-title-width))
          ;; Per-column face: title inherits the default face (theme colors),
          ;; username and url are tinted.  The text is padded first, then
          ;; propertized, so the whole column (padding included) takes the
@@ -891,7 +905,7 @@ space up to the next column."
          (col (lambda (f)
                 (let* ((value (keemacs--field entry f))
                        (width (if (equal f "Title")
-                                  keemacs-title-width
+                                  title-width
                                 keemacs-field-width))
                        (used (truncate-string-to-width value width))
                        (pad (make-string
@@ -905,9 +919,7 @@ space up to the next column."
                   (if (and expired (equal f "Title"))
                       (concat (propertize used 'face 'keemacs-expired) pad)
                     (concat (propertize (concat used pad) 'face face))))))
-         (str (concat prefix mark
-                      (when (not (string-empty-p prefix)) " ")
-                      (mapconcat col keemacs-fields "\t"))))
+         (str (concat lead (mapconcat col keemacs-fields "\t"))))
     (put-text-property 0 (length str) 'kb-path path str)
     str))
 

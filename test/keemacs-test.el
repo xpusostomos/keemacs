@@ -795,6 +795,21 @@ decoded expiry drives the expired flag."
       (should (equal 'keemacs-title (get-text-property 0 'face line)))
       (should (equal "/g/junk" (get-text-property 0 'kb-path line))))))
 
+(ert-deftest keemacs-expired-candidate-alignment ()
+  "The ❌ mark borrows its width from the title column: the username
+column starts at the same display position for expired and living
+entries."
+  (let ((exp (keemacs--format-candidate
+              "/x" '(("Group" . "/") ("Title" . "old")
+                     ("UserName" . "alice") ("URL" . "https://x")
+                     ("Expires" . "True")
+                     ("ExpiryTime" . "2020-01-01T00:00:00Z"))))
+        (liv (keemacs--format-candidate
+              "/y" '(("Group" . "/") ("Title" . "new")
+                     ("UserName" . "bob") ("URL" . "https://y")))))
+    (should (= (string-width (substring exp 0 (string-match-p "alice" exp)))
+               (string-width (substring liv 0 (string-match-p "bob" liv)))))))
+
 (ert-deftest keemacs-tree-buffer-keeps-expired-face ()
   "The built tree buffer keeps the expired title's face: it is set as
 `font-lock-face' as well, which the buffer's font-lock does not strip."
