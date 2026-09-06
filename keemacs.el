@@ -369,14 +369,14 @@ spec."
 STDIN already contains the database password (or nothing for a
 passwordless DB) plus the entry's password, as required by
 `keemacs-auth--keepassxc-run-stdin'.  PASSWORD is the database's
-resolved master password (possibly `:no-password')."
+resolved master password (possibly `:no-password'), used to build the
+global options; the actual passwords travel in STDIN."
   (apply #'keemacs-auth--keepassxc-run-stdin
          stdin
-         password
-         (keemacs-auth--no-password-flag password)
-         (keemacs--db-keyfile)
-         (keemacs--db-yubi)
-         args))
+         (append args
+                 (keemacs-auth--no-password-flag password)
+                 (keemacs--db-keyfile)
+                 (keemacs--db-yubi))))
 
 (defun keemacs--require-db (&optional selector)
   "Signal an error unless a database is configured.
@@ -1510,23 +1510,33 @@ skipped."
                          paths))))
     (when (null moves)
       (user-error "Already in %s" group))
-    (let ((dbpw (keemacs--db-password))
-          (db (keemacs--database-path)))
+    ;; keepassxc-cli reads the database password from stdin for `mv'
+    ;; -- exactly like the entry commit's move.  The passwords travel
+    ;; in STDIN; the global options are command arguments.
+    (let* ((dbpw (keemacs--db-password))
+           (stdin (if (eq dbpw :no-password) "" (concat dbpw "\n")))
+           (db (keemacs--database-path))
+           (global (append (keemacs-auth--no-password-flag dbpw)
+                           (keemacs--db-keyfile)
+                           (keemacs--db-yubi))))
       (dolist (move moves)
-        (let ((run (keemacs--run-stdin dbpw "" "mv" (car move) group)))
+        (let ((run (apply #'keemacs-auth--keepassxc-run-stdin
+                          stdin
+                          (append (list "mv") global
+                                  (list db (car move) group)))))
           (unless (eq (cdr run) 0)
-            (keemacs-auth--error (car run) db (cdr run)))))
-      ;; Re-point the view buffer at a moved entry it is showing.
-      (let ((view (get-buffer "*keemacs-view*")))
-        (when view
-          (with-current-buffer view
-            (when-let* ((move (assoc keemacs-view-path moves)))
-              (setq keemacs-view-path (cdr move))
-              (keemacs-view-update nil)))))
-      (message "Moved %s to %s"
-               (mapconcat (lambda (move) (keemacs--entry-basename (car move)))
-                          moves ", ")
-               group))))
+            (keemacs-auth--error (car run) db (cdr run))))))
+    ;; Re-point the view buffer at a moved entry it is showing.
+    (let ((view (get-buffer "*keemacs-view*")))
+      (when view
+        (with-current-buffer view
+          (when-let* ((move (assoc keemacs-view-path moves)))
+            (setq keemacs-view-path (cdr move))
+            (keemacs-view-update nil)))))
+    (message "Moved %s to %s"
+             (mapconcat (lambda (move) (keemacs--entry-basename (car move)))
+                        moves ", ")
+             group)))
 
 (defun keemacs--entry-commit ()
   "Commit the add/clone/edit in the current entry buffer.
@@ -1861,10 +1871,11 @@ databases it could read without prompting.")
 (defun keemacs-tree-region-candidates ()
   "Return the tree's region-selected rows as embark candidates.
 With an active region that is a valid section selection (C-SPC, then
-move) the selection is returned, so `embark-act-all' can act on all of
-it at once -- the same way dired offers its marked files.  The
-selection must be all entries or all groups, from a single database:
-the one the actions will run against, made active here."
+move) the selection is returned as a `keemacs-multi' target, so
+`embark-act-all' can act on all of it at once -- the same way dired
+offers its marked files.  The selection must be all entries or all
+groups, from a single database: the one the actions will run against,
+made active here."
   (when (derived-mode-p 'keemacs-tree-mode)
     (let* ((sections (or (magit-region-sections 'keemacs-tree-entry)
                          (magit-region-sections 'keemacs-tree-group)))
@@ -1874,18 +1885,88 @@ the one the actions will run against, made active here."
       (when (and dbsecs (cl-every #'identity dbsecs)
                  (= 1 (length (cl-remove-duplicates specs :test #'equal))))
         (keemacs-tree--use-db (car dbsecs))
-        (cons (if (string-suffix-p "/" (oref (car sections) value))
-                  'keemacs-tree-group
-                'keemacs)
+        (cons 'keemacs-multi
               (mapcar (lambda (s) (oref s value)) sections))))))
 
 (add-to-list 'embark-candidate-collectors #'keemacs-tree-region-candidates)
 
 ;; Deleting and moving work on the whole selection in one go, when the
 ;; action is invoked on several candidates at once (`embark-act-all').
+;; The region menu is its own type with only the actions that make
+;; sense on a set of rows -- the per-entry menu's copies, view and
+;; edit would be meaningless there.
+(defconst keemacs-multi-actions
+  '(("m" "move to group"   keemacs-move)
+    ("d" "delete selection" keemacs-multi-delete)
+    ("u" "copy usernames"   keemacs-multi-copy-username)
+    ("t" "copy titles"      keemacs-multi-copy-title))
+  "The single source of truth for the actions offered on a tree
+region selection.  Each element is (KEY LABEL FUNCTION); the function
+receives the whole selection -- a list of paths -- and acts on it in
+one go.")
+
+(defun keemacs-tree--multi-entries (paths)
+  "Return the entry paths (no trailing slash) among PATHS."
+  (cl-remove-if (lambda (p) (string-suffix-p "/" p)) paths))
+
+(defun keemacs-multi-delete (paths)
+  "Delete the selected rows, with one confirmation for all of them.
+PATHS is the list of selected paths (the Embark multi-target form):
+entries go through `keemacs-delete', groups through
+`keemacs-delete-group', each recycling to the Recycle Bin."
+  (interactive "sPaths: ")
+  (let ((paths (if (listp paths) paths (list paths))))
+    (when-let* ((entries (keemacs-tree--multi-entries paths)))
+      (keemacs-delete entries))
+    (when-let* ((groups (cl-remove-if-not
+                         (lambda (p) (string-suffix-p "/" p)) paths)))
+      (keemacs-delete-group groups))))
+
+(defun keemacs--multi-copy (field paths)
+  "Copy every selected entry's FIELD to the kill ring, one per line.
+PATHS is the selection (the Embark multi-target form); group paths
+have no fields and are skipped."
+  (let ((values (mapcan (lambda (p)
+                          (unless (string-suffix-p "/" p)
+                            (list (keemacs--field (keemacs--entry-get p)
+                                                  field))))
+                        (if (listp paths) paths (list paths)))))
+    (if values
+        (progn (kill-new (string-join values "\n"))
+               (message "Copied %d %ss" (length values) field))
+      (user-error "No entries in the selection"))))
+
+(defun keemacs-multi-copy-username (paths)
+  "Copy every selected entry's username, one per line, to the kill ring."
+  (interactive "sPaths: ")
+  (keemacs--multi-copy "UserName" paths))
+
+(defun keemacs-multi-copy-title (paths)
+  "Copy every selected entry's title, one per line, to the kill ring."
+  (interactive "sPaths: ")
+  (keemacs--multi-copy "Title" paths))
+
+(defconst keemacs-multi-action-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'keemacs-move)
+    (dolist (entry (reverse keemacs-multi-actions))
+      (pcase-let ((`(,key ,_label ,fn) entry))
+        (define-key map (kbd key) fn)))
+    map)
+  "Embark actions for a tree region selection (`keemacs-multi').
+Only actions that make sense on a set of rows -- the per-entry menu's
+copies, view and edit would be meaningless here.  The actions receive
+the whole selection and act on it in one go, against the selection's
+database, which the candidate collector made active.")
+
+(add-to-list 'embark-keymap-alist
+             '(keemacs-multi . keemacs-multi-action-map))
+(add-to-list 'embark-default-action-overrides
+             '(keemacs-multi . keemacs-move))
 (mapc (lambda (command)
         (add-to-list 'embark-multitarget-actions command))
-      '(keemacs-move keemacs-delete keemacs-delete-group))
+      '(keemacs-move keemacs-multi-delete keemacs-multi-copy-username
+                     keemacs-multi-copy-title))
 
 (defun keemacs-tree-act ()
   "Open an embark menu for the tree row at point.
@@ -2141,6 +2222,39 @@ value shows its first line only."
             (put-text-property 0 (length str) 'kb-indent indent str))
           (insert str "\n"))))))
 
+(defvar-local keemacs-tree--built-databases nil
+  "The `keemacs-databases' the tree buffer was last built from.")
+
+(defvar-local keemacs-tree--db-mtimes nil
+  "Alist of (FILE . MTIME) for the configured databases, as of the
+last tree build.  Used to detect, cheaply, whether the tree is stale:
+a rebuild only re-exports when one of the files changed on disk.")
+
+(defun keemacs-tree--current-mtimes ()
+  "Return (FILE . MTIME) for every configured database.
+A missing file gets an MTIME of nil."
+  (mapcar (lambda (spec)
+            (let* ((file (expand-file-name
+                          (keemacs-auth-db-spec-file
+                           (keemacs-auth-db-spec-normalize spec))))
+                   (attr (file-attributes file)))
+              (cons file (and attr
+                              (file-attribute-modification-time attr)))))
+          keemacs-databases))
+
+(defun keemacs-tree--stale-p ()
+  "Return non-nil when the tree needs rebuilding.
+That is the case when `keemacs-databases' changed since the tree was
+built, or one of the database files changed on disk -- including by
+another program, e.g. the KeePass GUI or a sync."
+  (or (not (equal keemacs-databases keemacs-tree--built-databases))
+      (cl-some (lambda (entry)
+                 (let ((attr (file-attributes (car entry))))
+                   (not (equal (and attr
+                                    (file-attribute-modification-time attr))
+                               (cdr entry)))))
+               keemacs-tree--db-mtimes)))
+
 (defun keemacs-tree--insert ()
   "Build the tree sections in the current buffer from the databases.
 The root of the tree is one section per database in
@@ -2149,7 +2263,7 @@ no master password, or the password known or already cached -- is
 expanded; the others show only their name, marked \"(locked)\", until
 activated, which asks for the password.  Groups start closed and
 entries start with their fields closed; see
-`keemacs-tree-expanded-by-default'."
+`keemacs-tree-expand-databases'."
   (let ((inhibit-read-only t))
     (erase-buffer)
     ;; `magit-insert-section' would make the first top-level section
@@ -2182,22 +2296,35 @@ entries start with their fields closed; see
     ;; Hidden sections only get their overlay when shown is applied
     ;; from the root, which recurses into every hidden child.
     (magit-section-show magit-root-section)
-    (goto-char (point-min))))
+    (goto-char (point-min)))
+  (setq-local keemacs-tree--built-databases keemacs-databases
+              keemacs-tree--db-mtimes (keemacs-tree--current-mtimes)))
 
 (defun keemacs-tree-refresh (&rest _)
   "Reload the loaded databases and rebuild the tree.
-Point stays on the entry it was on, or moves to the top when that
-entry no longer exists.  Every section keeps its open/closed state
+Point stays on the entry it was on, or -- when that entry moved to a
+different group -- on an entry of the same name, or moves to the top
+when it no longer exists.  Every section keeps its open/closed state
 across the rebuild."
   (interactive)
-  (let ((path (get-text-property (point) 'kb-path)))
+  (let* ((path (get-text-property (point) 'kb-path))
+         (base (and path (keemacs--entry-basename path))))
     (keemacs-tree--insert)
-    (when path
-      (let ((found (text-property-search-forward
-                    'kb-path path (lambda (a b) (equal a b)))))
-        (goto-char (if found
-                       (prop-match-beginning found)
-                     (point-min)))))))
+    (goto-char
+     (or (and path
+              (let ((found (text-property-search-forward
+                            'kb-path path #'equal)))
+                (and found (prop-match-beginning found))))
+         ;; The row may have moved to another group: fall back to the
+         ;; first entry of the same name.
+         (and base
+              (let ((found (text-property-search-forward
+                            'kb-path base
+                            (lambda (_ v)
+                              (and (stringp v)
+                                   (string-suffix-p (concat "/" base) v))))))
+                (and found (prop-match-beginning found))))
+         (point-min)))))
 
 (defun keemacs-tree--toggle-password (section)
   "Reveal or conceal the password below the masked field line at point.
@@ -2384,6 +2511,22 @@ databases."
         (keemacs-tree-mode))
       (keemacs-tree--insert))
     (switch-to-buffer buf)))
+
+(defun keemacs-tree--refresh-on-show (&optional frame)
+  "Rebuild the tree when it becomes visible, if a database changed.
+This keeps the tree honest after changes made anywhere -- by keemacs
+itself or by another program writing the kdbx -- without paying for a
+re-export on every visit: the rebuild only happens when a configured
+database file's modification time changed on disk, or the database
+list itself did."
+  (dolist (window (window-list frame))
+    (with-current-buffer (window-buffer window)
+      (when (and (derived-mode-p 'keemacs-tree-mode)
+                 (keemacs-tree--stale-p))
+        (keemacs-tree-refresh)))))
+
+(add-hook 'window-buffer-change-functions #'keemacs-tree--refresh-on-show)
+(add-hook 'window-selection-change-functions #'keemacs-tree--refresh-on-show)
 
 ;;;###autoload
 (defun keemacs-titles ()

@@ -929,12 +929,12 @@ made active.  A mixed or cross-database selection yields none."
         (should m2)
         (goto-char (prop-match-beginning m2)))
       (cl-letf (((symbol-function 'region-active-p) (lambda () t)))
-        (should (equal (cons 'keemacs '("/A/b" "/A/b2"))
+        (should (equal (cons 'keemacs-multi '("/A/b" "/A/b2"))
                        (keemacs-tree-region-candidates)))
         ;; The candidates' database was made active.
         (should (equal "/test.kdbx"
                        (keemacs-auth-db-spec-file keemacs-database)))))
-    ;; Two sibling groups: group candidates.
+    ;; Two sibling groups: the same multi menu, group paths.
     (let ((keemacs-test-entries
            '(("/A/x" . (("Group" . "/A/") ("Title" . "x")))))
           (keemacs--group-icons
@@ -947,8 +947,52 @@ made active.  A mixed or cross-database selection yields none."
           (should m2)
           (goto-char (prop-match-beginning m2)))
         (cl-letf (((symbol-function 'region-active-p) (lambda () t)))
-          (should (equal (cons 'keemacs-tree-group '("/A/" "/B/"))
+          (should (equal (cons 'keemacs-multi '("/A/" "/B/"))
                          (keemacs-tree-region-candidates))))))))
+
+(ert-deftest keemacs-multi-action-map ()
+  "The region menu offers only actions that make sense on a set of
+rows, and they are registered as multi-target actions."
+  (should (eq (lookup-key keemacs-multi-action-map (kbd "m"))
+              #'keemacs-move))
+  (should (eq (lookup-key keemacs-multi-action-map (kbd "d"))
+              #'keemacs-multi-delete))
+  (should (eq (lookup-key keemacs-multi-action-map (kbd "u"))
+              #'keemacs-multi-copy-username))
+  (should (eq (lookup-key keemacs-multi-action-map (kbd "t"))
+              #'keemacs-multi-copy-title))
+  (should (eq (lookup-key keemacs-multi-action-map (kbd "RET"))
+              #'keemacs-move))
+  (should (eq (lookup-key keemacs-multi-action-map (kbd "v")) nil))
+  (should (memq 'keemacs-move embark-multitarget-actions))
+  (should (memq 'keemacs-multi-delete embark-multitarget-actions))
+  (should (memq 'keemacs-multi-copy-username embark-multitarget-actions)))
+
+(ert-deftest keemacs-multi-delete-dispatches ()
+  "`keemacs-multi-delete' routes entry paths to `keemacs-delete' and
+group paths to `keemacs-delete-group'.  (The commands' own
+confirmations are covered by their own tests.)"
+  (let ((entry-deletes nil)
+        (group-deletes nil))
+    (cl-letf (((symbol-function 'keemacs-delete)
+               (lambda (ps) (setq entry-deletes ps)))
+              ((symbol-function 'keemacs-delete-group)
+               (lambda (ps) (setq group-deletes ps))))
+      (keemacs-multi-delete '("/a" "/b" "/G/")))
+    (should (equal entry-deletes '("/a" "/b")))
+    (should (equal group-deletes '("/G/")))))          ; one per delete command
+
+(ert-deftest keemacs-multi-copy ()
+  "`keemacs-multi-copy-username' collects the selected entries'
+usernames into the kill ring, one per line."
+  (let ((copies nil))
+    (cl-letf (((symbol-function 'keemacs--entry-get)
+               (lambda (_)
+                 '(("UserName" . "u") ("Title" . "t"))))
+              ((symbol-function 'kill-new)
+               (lambda (s) (setq copies (append copies (list s))))))
+      (keemacs-multi-copy-username '("/a" "/b")))
+    (should (equal copies '("u\nu")))))
 
 (ert-deftest keemacs-move-moves-entries ()
   "`keemacs-move' moves each entry into the chosen group with one
@@ -965,18 +1009,20 @@ the chosen group are skipped.  The group is prompted for once."
               ((symbol-function 'keemacs--db-password)
                (lambda () "pw"))
               ((symbol-function 'keemacs-auth--keepassxc-run-stdin)
-               (lambda (_stdin _pw &rest args)
-                 (setq runs (append runs (list (nthcdr 3 args))))
+               (lambda (stdin &rest args)
+                 (setq runs (append runs (list (cons stdin args))))
                  (cons "" 0))))
       ;; A single path.
       (keemacs-move "/personal/github")
       ;; A multi-target list: one prompt, one mv per entry, and an
       ;; entry already in the target group is skipped.
       (keemacs-move '("/a" "/b" "/Work/in-place")))
-    (should (equal '(("mv" "/personal/github" "/Work/")
-                     ("mv" "/a" "/Work/")
-                     ("mv" "/b" "/Work/"))
-                   runs))
+    ;; The database password travels in STDIN; the command is
+    ;; `mv' + database + entry + destination group.
+    (should (equal '(("pw\n" "mv" "/test.kdbx" "/personal/github" "/Work/")
+                     ("pw\n" "mv" "/test.kdbx" "/a" "/Work/")
+                     ("pw\n" "mv" "/test.kdbx" "/b" "/Work/"))
+                   (mapcar (lambda (run) (cons (car run) (cdr run))) runs)))
     ;; One prompt per invocation -- even the multi-path one asks once.
     (should (= 2 prompts))))
 
@@ -1054,6 +1100,52 @@ keep theirs, where toggling is what a click means."
       (keemacs-tree-refresh)
       (should (equal "/b" (get-text-property (point) 'kb-path))))))
 
+(ert-deftest keemacs-tree-refresh-follows-moved-entry ()
+  "When the entry under point moved to another group, point follows
+it by name."
+  (let ((keemacs-test-entries
+         '(("/a" . (("Group" . "/") ("Title" . "a")))
+           ("/b" . (("Group" . "/") ("Title" . "b")))))
+        (keemacs--group-icons '(("/Work" . ("48" . nil)))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/b" #'equal)))
+        (should m)
+        (goto-char (prop-match-beginning m)))
+      ;; b has moved into the Work group; /a is gone.
+      (setq keemacs-test-entries
+            '(("/Work/b" . (("Group" . "/Work/") ("Title" . "b")))))
+      (keemacs-tree-refresh)
+      (should (equal "/Work/b" (get-text-property (point) 'kb-path))))))
+
+(ert-deftest keemacs-tree-stale-p ()
+  "`keemacs-tree--stale-p' sees database file changes and database
+list changes, and is quiet when nothing changed."
+  (let ((db (keemacs-auth-make-db-spec :file "/test.kdbx" :password nil)))
+    (with-temp-buffer
+      (keemacs-tree-mode)
+      (let ((keemacs-databases (list db))
+            (keemacs-tree--built-databases (list db))
+            (keemacs-tree--db-mtimes
+             (list (cons "/test.kdbx" '(0 0 0)))))
+        ;; Nothing changed: not stale.
+        (cl-letf (((symbol-function 'file-attributes)
+                   (lambda (_)
+                     '(nil nil nil nil (0 0 0) (0 0 0) 0 nil nil nil 0 0))))
+          (should-not (keemacs-tree--stale-p)))
+        ;; The file's mtime moved: stale.
+        (cl-letf (((symbol-function 'file-attributes)
+                   (lambda (_)
+                     '(nil nil nil nil (0 0 0) (1 0 0) 0 nil nil nil 0 0))))
+          (should (keemacs-tree--stale-p)))
+        ;; The file vanished: stale.
+        (cl-letf (((symbol-function 'file-attributes) (lambda (_) nil)))
+          (should (keemacs-tree--stale-p))))
+      ;; The configured database list changed: stale.
+      (let ((keemacs-databases
+             (list db (keemacs-auth-make-db-spec :file "/other.kdbx"))))
+        (should (keemacs-tree--stale-p))))))
 (ert-deftest keemacs-tree-buffer-is-read-only ()
   "The tree buffer is read-only (magit-section-mode sets it)."
   (with-temp-buffer
