@@ -707,6 +707,147 @@ export is `keemacs-test-entries'."
     (should (string-suffix-p "t" line))
     (should (equal "/g/t" (get-text-property 0 'kb-path line)))))
 
+(ert-deftest keemacs-entry-expired-p ()
+  "`keemacs--entry-expired-p' judges by Expires and ExpiryTime."
+  (should (keemacs--entry-expired-p
+           '(("Expires" . "True") ("ExpiryTime" . "2020-01-01T00:00:00Z"))))
+  (should-not (keemacs--entry-expired-p
+               '(("Expires" . "False")
+                 ("ExpiryTime" . "2020-01-01T00:00:00Z"))))
+  (should-not (keemacs--entry-expired-p
+               '(("Expires" . "True")
+                 ("ExpiryTime" . "2999-01-01T00:00:00Z"))))
+  ;; No expiry data at all.
+  (should-not (keemacs--entry-expired-p '(("Title" . "x"))))
+  ;; An unparseable ExpiryTime (the classic-KeePassX zero time, or
+  ;; arbitrary junk) is no expiry, not a crash -- M-x keemacs used to
+  ;; abort on such entries.
+  (should-not (keemacs--entry-expired-p
+               '(("Expires" . "True")
+                 ("ExpiryTime" . "AAAAAAAAAAA=")))))
+
+(ert-deftest keemacs-expiry-legacy-times ()
+  "Classic KeePassX stores times as base64 of an 8-byte
+little-endian seconds-since-0001 value; they are decoded, and the
+decoded expiry drives the expired flag."
+  (let ((parsed (keemacs--expiry-parse "TIVs3g4AAAA=")))
+    (should parsed)
+    ;; TIVs3g4AAAA= is 2024-09-06 05:08:28 UTC.
+    (should (equal "2024-09-06 05:08"
+                   (format-time-string "%Y-%m-%d %H:%M" parsed "UTC0"))))
+  ;; UKgC5w4AAAA= is 2029-03-31 13:00 UTC.
+  (should (equal "2029-03-31 13:00"
+                 (format-time-string "%Y-%m-%d %H:%M"
+                                     (keemacs--expiry-parse "UKgC5w4AAAA=")
+                                     "UTC0")))
+  ;; The zero time (classic "no expiry") and junk are rejected.
+  (should-not (keemacs--expiry-parse "AAAAAAAAAAA="))
+  (should-not (keemacs--expiry-parse "nonsense"))
+  ;; The real-world shape: an entry expiring 2024-09-06 is expired.
+  (should (keemacs--entry-expired-p
+           '(("Expires" . "True") ("ExpiryTime" . "TIVs3g4AAAA="))))
+  (let ((line (keemacs-tree--format-entry
+               "/x" '(("Group" . "/") ("Title" . "abc")
+                      ("Expires" . "True")
+                      ("ExpiryTime" . "TIVs3g4AAAA=")))))
+    (should (string-match-p "❌" line))
+    (should (equal 'keemacs-expired
+                   (get-text-property (string-match-p "abc" line)
+                                      'face line)))))
+
+(ert-deftest keemacs-expired-entry-marking ()
+  "Expired entries are marked with ❌ and the struck-through
+`keemacs-expired' face, in the tree and in the selection minibuffer."
+  (let ((entry '(("Group" . "/g/") ("Title" . "old")
+                 ("Expires" . "True") ("ExpiryTime" . "2020-01-01T00:00:00Z"))))
+    (let ((line (keemacs-tree--format-entry "/g/old" entry)))
+      (should (string-match-p "❌" line))
+      ;; The title itself carries the expired face -- as both `face'
+      ;; and `font-lock-face', which survives the tree buffer's
+      ;; font-lock -- not the ❌ prefix.
+      (should (equal 'keemacs-expired
+                     (get-text-property (string-match-p "old" line)
+                                        'face line)))
+      (should (equal 'keemacs-expired
+                     (get-text-property (string-match-p "old" line)
+                                        'font-lock-face line)))
+      (should (equal "/g/old" (get-text-property 0 'kb-path line))))
+    (let ((line (keemacs--format-candidate "/g/old" entry)))
+      (should (string-match-p "❌" line))
+      (should (equal 'keemacs-expired
+                     (get-text-property (string-match-p "old" line)
+                                        'face line)))
+      ;; The strike stops at the end of the title: the column padding
+      ;; is unpropertized, so it does not run up to the username.
+      (should-not (get-text-property (+ (string-match-p "old" line) 3)
+                                     'face line)))
+    ;; Not expired: no mark, the normal title face.
+    (let* ((entry '(("Group" . "/g/") ("Title" . "fresh")))
+           (line (keemacs-tree--format-entry "/g/fresh" entry)))
+      (should-not (string-match-p "❌" line))
+      (should (equal 'keemacs-title (get-text-property 0 'face line))))
+    ;; The classic zero time renders as a normal entry instead of
+    ;; aborting the whole tree build.
+    (let* ((entry '(("Group" . "/g/") ("Title" . "junk")
+                    ("Expires" . "True") ("ExpiryTime" . "AAAAAAAAAAA=")))
+           (line (keemacs-tree--format-entry "/g/junk" entry)))
+      (should-not (string-match-p "❌" line))
+      (should (equal 'keemacs-title (get-text-property 0 'face line)))
+      (should (equal "/g/junk" (get-text-property 0 'kb-path line))))))
+
+(ert-deftest keemacs-tree-buffer-keeps-expired-face ()
+  "The built tree buffer keeps the expired title's face: it is set as
+`font-lock-face' as well, which the buffer's font-lock does not strip."
+  (let ((keemacs-test-entries
+         '(("/x" . (("Group" . "/") ("Title" . "expired-title")
+                    ("Expires" . "True")
+                    ("ExpiryTime" . "2020-01-01T00:00:00Z"))))))
+    (keemacs-test-tree-buffer
+      (keemacs-tree--insert)
+      (goto-char (point-min))
+      (let ((m (text-property-search-forward 'kb-path "/x" #'equal)))
+        (goto-char (prop-match-beginning m)))
+      (let* ((bol (line-beginning-position))
+             (tpos (+ bol (string-match-p
+                           "expired-title"
+                           (buffer-substring bol (line-end-position))))))
+        (should (equal 'keemacs-expired (get-text-property tpos 'face)))
+        (should (equal 'keemacs-expired
+                       (get-text-property tpos 'font-lock-face)))))))
+
+(ert-deftest keemacs-view-shows-expiry ()
+  "The view buffer shows an `Expires' line when the entry has one,
+struck through once it has passed."
+  (with-temp-buffer
+    (keemacs-view-mode)
+    (setq-local keemacs-view-path "/x"
+                keemacs-view-expiry "2020-01-01T00:00:00Z")
+    (cl-letf (((symbol-function 'keemacs--entry-get)
+               (lambda (_) '(("Title" . "x") ("UserName" . "u")))))
+      (keemacs-view-update nil))
+    (should (string-match-p "Expires" (buffer-string)))
+    (should (get-text-property
+             (string-match-p "2020-01-01" (buffer-string))
+             'face (buffer-string)))
+    (should (string-match-p "2020-01-01" (buffer-string))))
+  ;; An entry without expiry shows no line.
+  (with-temp-buffer
+    (keemacs-view-mode)
+    (setq-local keemacs-view-path "/x" keemacs-view-expiry nil)
+    (cl-letf (((symbol-function 'keemacs--entry-get)
+               (lambda (_) '(("Title" . "x")))))
+      (keemacs-view-update nil))
+    (should-not (string-match-p "Expires" (buffer-string))))
+  ;; Neither does an unparseable one -- and it does not crash.
+  (with-temp-buffer
+    (keemacs-view-mode)
+    (setq-local keemacs-view-path "/x"
+                keemacs-view-expiry "AAAAAAAAAAA=")
+    (cl-letf (((symbol-function 'keemacs--entry-get)
+               (lambda (_) '(("Title" . "x")))))
+      (keemacs-view-update nil))
+    (should-not (string-match-p "Expires" (buffer-string)))))
+
 (ert-deftest keemacs-tree-build-sections ()
   "`keemacs-tree--build' nests group and entry sections.
 Groups keep their trailing-slash path and are headings; entries are
@@ -1278,6 +1419,13 @@ TAB again conceals it."
         (should (string-match-p "Password" (buffer-string)))
         (should (string-match-p "\\*\\{6\\}" (buffer-string)))
         (should-not (string-match-p "secret" (buffer-string)))
+        ;; The tree's retained snapshot holds no real password either:
+        ;; only the presence marker the masked line needs.
+        (let* ((dbsec (car (oref magit-root-section children)))
+               (entries (plist-get (oref dbsec data) :entries)))
+          (should (equal "******"
+                         (cdr (assoc "Password"
+                                     (cdr (assoc "/x" entries)))))))
         ;; The title is the entry's own line, not a repeated sub-line.
         (should-not (string-match-p "Title" (buffer-string)))
         ;; TAB on the masked line reveals the value as a sub-line.

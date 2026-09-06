@@ -404,8 +404,11 @@ Four entry points:
   the tree -- the title is the entry's own line, so it is not
   repeated -- with the password masked as =******=; <kbd>TAB</kbd> on
   the masked line reveals the real password as a sub-line, and
-  collapsing anything conceals it again).  A single click only moves
-  point -- double click to act, it is easy to hit an entry by
+  collapsing anything conceals it again).  An *expired* entry (the
+  expiry is set in the KeePass GUI -- the CLI cannot change it) is
+  marked with an ❌ after its icon and its title is struck through,
+  in the tree and in the selection minibuffer.  A single click only
+  moves point -- double click to act, it is easy to hit an entry by
   accident.  <kbd>C-.</kbd> (=embark-act=) works anywhere on a row --
   on an entry it opens the full action menu, on a group a menu of
   group actions (delete the group, add an entry or a subgroup here),
@@ -524,7 +527,10 @@ loaded.  Any prefix key works -- bind =F5= or =C-c k= the same way.
 
 Press =r= to reveal or re-hide the password; =u=, =p=, =l=, =n=, =o= copy
 the corresponding field; =e= edits; =q= quits.  The key menu at the
-bottom shows all the bindings.
+bottom shows all the bindings.  An entry with an expiry date gets an
+=Expires= line under the notes, struck through once the date has
+passed (the date itself is set in the KeePass GUI -- =keepassxc-cli=
+offers no way to change it).
 
 **** Editing
 

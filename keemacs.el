@@ -69,6 +69,7 @@
 (require 'embark)
 (require 'embark-consult)
 (require 'image)
+(require 'iso8601)
 (require 'keemacs-auth)
 (require 'magit-section)
 (require 'password-cache)
@@ -108,6 +109,13 @@ The key itself stays uncolored."
   "Face for the URL column in candidate lines.
 \"orange\" rather than \"light orange\", which is not a valid color
 name on some displays and rendered uncolored."
+  :group 'keemacs)
+
+(defface keemacs-expired
+  '((t :inherit warning :strike-through t))
+  "Face for expired entries: struck through on the `warning' face.
+Used for the entry title in the tree and the selection minibuffer,
+and for the expiry time in the view buffer."
   :group 'keemacs)
 
 
@@ -510,6 +518,15 @@ nothing downstream may re-derive group or title by splitting it."
                        fields))
              (fields (cons (cons "Group" (concat group-path "/"))
                            fields))
+             ;; The expiry data (`keepassxc-cli show' does not print
+             ;; entry times, so the export is the only source).
+             (times (car (keemacs--xml-children-tag entry 'Times)))
+             (expires (and times (keemacs--xml-tag-text times 'Expires)))
+             (expiry-time (and times (keemacs--xml-tag-text times 'ExpiryTime)))
+             (fields (append (when expires (list (cons "Expires" expires)))
+                             (when expiry-time
+                               (list (cons "ExpiryTime" expiry-time)))
+                             fields))
              ;; The entry's custom icon, when it has one.
              (custom-id (keemacs--xml-tag-text entry 'CustomIconUUID))
              (title (cdr (assoc "Title" fields)))
@@ -606,6 +623,46 @@ The parent recorded from the export tree when known (a title containing
 \"/\" mis-splits the path string), else derived from the path."
   (or (cdr (assoc path keemacs--entry-parents))
       (keemacs--entry-directory path)))
+
+(defconst keemacs--year-1-unix 62135596800
+  "Unix time of 0001-01-01 00:00 UTC.")
+
+(defun keemacs--expiry-parse (time)
+  "Return TIME as an Emacs time value, or nil.
+keepassxc writes entry times in XML exports in two forms: ISO 8601
+strings, and base64 of an 8-byte little-endian seconds-since-0001
+integer (e.g. \\=TIVs3g4AAAA=) -- which one depends on the database
+and the export path, so both are accepted.  Unparseable values count
+as no expiry rather than crashing the display: databases are portable
+and user-editable, so the ExpiryTime field can contain arbitrary junk."
+  (or (condition-case nil
+          (encode-time (iso8601-parse time))
+        (error nil))
+      (when (and (stringp time)
+                 (string-match-p "\\`[A-Za-z0-9+/]+=\\{0,2\\}\\'" time))
+        (condition-case nil
+            (let* ((raw (base64-decode-string time))
+                   (n 0))
+              (when (= 8 (length raw))
+                (dotimes (i 8)
+                  (setq n (+ n (* (aref raw i) (expt 256 i)))))
+                (let ((unix (- n keemacs--year-1-unix)))
+                  ;; Sanity window: 1970 .. year 4000.  Outside it the
+                  ;; value was not a legacy time after all.
+                  (and (>= unix 0) (<= unix 64092211200)
+                       (seconds-to-time unix)))))
+          (error nil)))))
+
+(defun keemacs--entry-expired-p (entry)
+  "Return non-nil if the ENTRY fields say the entry has expired.
+Expired means the export's `Expires' is True and the `ExpiryTime' is
+in the past.  Entries without expiry data -- or with an unparseable
+one -- never count as expired."
+  (and (equal (keemacs--field entry "Expires") "True")
+       (let ((time (keemacs--field entry "ExpiryTime")))
+         (and (stringp time) (not (string-empty-p time))
+              (let ((parsed (keemacs--expiry-parse time)))
+                (and parsed (time-less-p parsed (current-time))))))))
 
 (defun keemacs--group-contents (entries group)
   "Return the immediate children of GROUP in ENTRIES.
@@ -818,24 +875,37 @@ otherwise the unicode glyph for its standard icon."
   "Return a display string for ENTRY at PATH, tagged with `kb-path'.
 The line is prefixed with a picture of the entry's custom icon when it
 has one, else a unicode glyph approximating its standard icon (see
-`keemacs--icon-chars')."
+`keemacs--icon-chars'), followed by a ❌ when the entry has expired.
+An expired entry's title carries `keemacs-expired' (struck through)
+instead of `keemacs-title' -- on the title text only: the column
+padding stays unpropertized, or the strike would run through the blank
+space up to the next column."
   (let* ((prefix (keemacs--candidate-prefix path entry))
+         (expired (keemacs--entry-expired-p entry))
+         (mark (and expired (if (string-empty-p prefix) "❌ " " ❌")))
          ;; Per-column face: title inherits the default face (theme colors),
          ;; username and url are tinted.  The text is padded first, then
-         ;; propertized, so the whole column (padding included) takes the face.
+         ;; propertized, so the whole column (padding included) takes the
+         ;; face -- except the expired title, whose strike must stop at the
+         ;; end of the text.
          (col (lambda (f)
-                (let* ((text (truncate-string-to-width
-                              (keemacs--field entry f)
-                              (if (equal f "Title")
+                (let* ((value (keemacs--field entry f))
+                       (width (if (equal f "Title")
                                   keemacs-title-width
-                                keemacs-field-width)
-                              0 ?\s))
+                                keemacs-field-width))
+                       (used (truncate-string-to-width value width))
+                       (pad (make-string
+                             (max 0 (- width (string-width used))) ?\s))
                        (face (pcase f
-                               ("Title" 'keemacs-title)
+                               ("Title" (if expired
+                                            'keemacs-expired
+                                          'keemacs-title))
                                ("UserName" 'keemacs-username)
                                ("URL" 'keemacs-url))))
-                  (propertize text 'face face))))
-         (str (concat prefix
+                  (if (and expired (equal f "Title"))
+                      (concat (propertize used 'face 'keemacs-expired) pad)
+                    (concat (propertize (concat used pad) 'face face))))))
+         (str (concat prefix mark
                       (when (not (string-empty-p prefix)) " ")
                       (mapconcat col keemacs-fields "\t"))))
     (put-text-property 0 (length str) 'kb-path path str)
@@ -976,6 +1046,12 @@ that merely looks similar cannot resolve to the wrong entry."
 (defvar-local keemacs-view-path nil
   "The entry path shown in `keemacs-view-mode'.")
 
+(defvar-local keemacs-view-expiry nil
+  "The expiry time shown in the current view buffer, or nil.
+Only set when the entry actually expires (`Expires' True); the value
+is the export's ExpiryTime, since `keepassxc-cli show' does not print
+entry times.")
+
 (defconst keemacs-view-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
@@ -1087,6 +1163,17 @@ which case there is nothing to hide."
       (insert (funcall label "Password") pw "\n")
       (dolist (f '("URL" "Notes"))
         (insert (funcall label f) (keemacs--field entry f) "\n"))
+      ;; The expiry time (from the export; `show' does not print it),
+      ;; struck through on the warning face once it has passed.  An
+      ;; unparseable ExpiryTime is simply not shown.
+      (when-let* ((parsed (keemacs--expiry-parse keemacs-view-expiry)))
+        (let* ((expiry (format-time-string "%Y-%m-%d %H:%M" parsed))
+               (text (if (keemacs--entry-expired-p
+                          (list (cons "Expires" "True")
+                                (cons "ExpiryTime" keemacs-view-expiry)))
+                         (propertize expiry 'face 'keemacs-expired)
+                       expiry)))
+          (insert (funcall label "Expires") text "\n")))
       (insert (keemacs--view-menu)))
     (goto-char (point-min)))
   (setq buffer-read-only t))
@@ -1124,16 +1211,26 @@ with no password."
   (keemacs-edit keemacs-view-path))
 
 (defun keemacs-view (path)
-  "View the entry at PATH, hiding its password until a key reveals it."
+  "View the entry at PATH, hiding its password until a key reveals it.
+The entry's expiry time, when it has one, is shown as an `Expires'
+line; it comes from the export, because `keepassxc-cli show' does not
+print entry times."
   (interactive "sEntry path: ")
-  ;; An entry's custom icon is only known from an export; if this view was
-  ;; not reached through a browse listing, load once so the icon is there.
-  (unless (assoc path keemacs--entry-custom-icons)
-    (keemacs--load-entries))
-  (let ((buf (get-buffer-create "*keemacs-view*")))
+  ;; Resolve a padded Embark target to a real path; clean paths (leading
+  ;; /) are used as-is.
+  (unless (string-prefix-p "/" (or path ""))
+    (setq path (or (keemacs--path-of path) path)))
+  ;; The icon and the expiry data are only known from an export; load
+  ;; once so both are there.
+  (let* ((entries (keemacs--load-entries))
+         (fields (cdr (assoc path entries)))
+         (buf (get-buffer-create "*keemacs-view*")))
     (with-current-buffer buf
       (keemacs-view-mode)
-      (setq-local keemacs-view-path path)
+      (setq-local keemacs-view-path path
+                  keemacs-view-expiry
+                  (and (equal (keemacs--field fields "Expires") "True")
+                       (keemacs--field fields "ExpiryTime")))
       (keemacs-view-update nil))
     (switch-to-buffer buf)))
 
@@ -2094,13 +2191,21 @@ databases."
 (defun keemacs-tree--format-entry (path entry)
   "Return the title-only display line for ENTRY at PATH.
 Tagged with `kb-path'; prefixed with the entry's icon (a real
-thumbnail on graphic displays, else the standard icon glyph); the
-title carries `keemacs-title'."
+thumbnail on graphic displays, else the standard icon glyph) and a ❌
+when the entry has expired; the title carries `keemacs-title', or
+`keemacs-expired' when expired.  The face is set as `font-lock-face'
+as well: font-lock's unfontify pass strips plain `face' properties it
+did not set itself, which would otherwise lose the strike-through in
+the tree buffer."
   (let* ((prefix (keemacs--candidate-prefix path entry))
-         (str (concat prefix
-                      (if (string-empty-p prefix) "" " ")
-                      (propertize (keemacs--field entry "Title")
-                                  'face 'keemacs-title))))
+         (expired (keemacs--entry-expired-p entry))
+         (mark (and expired (if (string-empty-p prefix) "❌ " " ❌")))
+         (face (if expired 'keemacs-expired 'keemacs-title))
+         (title (propertize (keemacs--field entry "Title")
+                            'face face 'font-lock-face face))
+         (str (concat prefix mark
+                      (when (not (string-empty-p prefix)) " ")
+                      title)))
     (put-text-property 0 (length str) 'kb-path path str)
     str))
 
@@ -2123,15 +2228,26 @@ This may prompt for the master password through the normal machinery;
 check `keemacs-tree--queryable-p' first when building the default view.
 The result is a plist carrying the entries plus the export globals
 `keemacs--load-entries' publishes, so every database renders from its
-own snapshot no matter how many were loaded since."
+own snapshot no matter how many were loaded since.  The snapshot never
+holds real passwords: it only keeps whether an entry has one (for the
+masked line), because revealing or copying fetches the value fresh via
+`keemacs--entry-get'."
   (let ((keemacs-database spec))
-    (list :spec spec
-          :label (keemacs--spec-label spec)
-          :entries (keemacs--load-entries)
-          :groups keemacs--group-icons
-          :parents keemacs--entry-parents
-          :custom-icons keemacs--entry-custom-icons
-          :images keemacs--custom-icons)))
+    (let ((entries (keemacs--load-entries)))
+      ;; Replace every real password with a fixed placeholder: the tree
+      ;; displays `******' regardless, and a resident secret would be
+      ;; pure liability (the transient export during parsing is the
+      ;; price of the one-call design; retaining it is not).
+      (dolist (entry entries)
+        (let ((pw (assoc "Password" (cdr entry))))
+          (when pw (setcdr pw "******"))))
+      (list :spec spec
+            :label (keemacs--spec-label spec)
+            :entries entries
+            :groups keemacs--group-icons
+            :parents keemacs--entry-parents
+            :custom-icons keemacs--entry-custom-icons
+            :images keemacs--custom-icons))))
 
 (defun keemacs-tree--db-open-p (spec)
   "Return non-nil if database SPEC's groups start expanded.
