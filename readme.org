@@ -24,10 +24,10 @@ password databases ( =.kdbx= files):
 
 To choose a package, ask yourself what you want:
 
-| You want...                                               | Use...                   |
-|-----------------------------------------------------------+--------------------------|
-| Emacs mail/ERC/etc. to log in using your KeePass entries  | =keemacs-auth=    |
-| A KeePass client inside Emacs: search, view, copy, edit   | =keemacs=         |
+| You want...                                              | Use...         |
+|----------------------------------------------------------+----------------|
+| Emacs mail/ERC/etc. to log in using your KeePass entries | =keemacs-auth= |
+| A KeePass client inside Emacs: search, view, copy, edit  | =keemacs=      |
 
 If you just want Emacs packages to use your passwords, only the
 =keemacs-auth= section below matters.  If you also want a full
@@ -97,14 +97,14 @@ given in any order:
 
 The accepted keywords:
 
-| keyword | meaning                                                                     |
-|---------+-----------------------------------------------------------------------------|
-| =:name= | a short, user-visible label for the database (used by =keemacs=).  Omitted means the file name is used. |
-| =:file= | the kdbx file path (string).  The only required keyword.                    |
-| =:keyfile= | the key file: a file name, a function returning one, or =nil=.          |
-| =:password= | the master password: a string, a function returning one, =:prompt= (ask the user), or =nil= (no master password).  Omitted means =:prompt=. |
-| =:yubi= | a YubiKey: a keepassxc-cli =slot[:serial]= string (e.g. ="1:7370001"=), a function returning one, or =nil= for none. |
-| =:key= | a hotkey for the database in =keemacs-select-database-by-key=: a character, a one-character string, or a function returning one.  Omitted means a key is assigned automatically in that menu. |
+| keyword     | meaning                                                                                                                                                                                       |
+|-------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =:name=     | a short, user-visible label for the database (used by =keemacs=).  Omitted means the file name is used.                                                                                       |
+| =:file=     | the kdbx file path (string).  The only required keyword.                                                                                                                                      |
+| =:keyfile=  | the key file: a file name, a function returning one, or =nil=.                                                                                                                                |
+| =:password= | the master password: a string, a function returning one, =:prompt= (ask the user), or =nil= (no master password).  Omitted means =:prompt=.                                                   |
+| =:yubi=     | a YubiKey: a keepassxc-cli =slot[:serial]= string (e.g. ="1:7370001"=), a function returning one, or =nil= for none.                                                                          |
+| =:key=      | a hotkey for the database in =keemacs-select-database-by-key=: a character, a one-character string, or a function returning one.  Omitted means a key is assigned automatically in that menu. |
 
 A keyword value may be a *no-argument function* wherever a string is
 allowed (=:keyfile=, =:password=, =:yubi=) -- the function is called each
@@ -148,12 +148,12 @@ maps those onto the **five canonical KeePass entry fields** that
 =keepassxc-cli= can actually search:
 
 | Canonical KeePass field | searched by keepassxc-cli as |
-|--------------------------|-------------------------------|
-| Title                    | =title:=                     |
-| UserName                 | =user:=                      |
-| Password                 | =password:=                  |
-| URL                      | =url:=                       |
-| Notes                    | =notes:=                     |
+|-------------------------+------------------------------|
+| Title                   | =title:=                     |
+| UserName                | =user:=                      |
+| Password                | =password:=                  |
+| URL                     | =url:=                       |
+| Notes                   | =notes:=                     |
 
 An entry is only found if its canonical field *contains* the value you
 are searching for.  For example, searching for =:host "smtp.gmail.com"=
@@ -165,12 +165,12 @@ in the **UserName** field.
 The auth-source keys are aliases for the canonical KeePass fields:
 
 | auth-source key | maps to canonical field | keepassxc-cli term used |
-|-----------------|-------------------------|-------------------------|
-| =:host=         | URL                     | =url:HOST=             |
-| =:user=         | UserName                | =user:USER=            |
-| =:title=        | Title                   | =title:TITLE=          |
-| =:password=     | Password                | =password:PASSWORD=    |
-| =:notes=        | Notes                   | =notes:NOTES=          |
+|-----------------+-------------------------+-------------------------|
+| =:host=         | URL                     | =url:HOST=              |
+| =:user=         | UserName                | =user:USER=             |
+| =:title=        | Title                   | =title:TITLE=           |
+| =:password=     | Password                | =password:PASSWORD=     |
+| =:notes=        | Notes                   | =notes:NOTES=           |
 
 keepassxc-cli's =search= command ANDs together space-separated,
 field-scoped terms, so when several keys are present they are combined
@@ -437,7 +437,7 @@ action in every entry menu and the view screen.
   every entry; move to a row and press <kbd>C-.</kbd> (=embark-act=) for
   the action menu.
 
-- <kbd>M-x</kbd> =keemacs-group= -- the same completion but
+- <kbd>M-x</kbd> =keemacs-groups= -- the same completion but
   *group by group*: it starts at the database root (=/=) and completes
   over the current group's subgroups and entries, so you drill down a
   KeePass folder hierarchy one level at a time (=/=, then =Internet/=,
@@ -455,19 +455,19 @@ larger one at the top of the view buffer); otherwise a unicode glyph
 approximates the entry's standard KeePass icon (key, globe, envelope,
 camera, ...).
 
-| key   | action                                |
-|-------+---------------------------------------|
-| =t=   | copy title                            |
-| =u=   | copy username                         |
-| =p=   | copy password                         |
-| =l=   | copy URL                              |
-| =n=   | copy notes                            |
-| =o=   | copy the current TOTP (if the entry has one) |
-| =v=   | view the entry (hide/show password)   |
-| =e=   | edit the entry                        |
-| =c=   | clone the entry                       |
-| =a=   | add a new entry in this group         |
-| =d=   | delete the entry                      |
+| key | action                                       |
+|-----+----------------------------------------------|
+| =t= | copy title                                   |
+| =u= | copy username                                |
+| =p= | copy password                                |
+| =l= | copy URL                                     |
+| =n= | copy notes                                   |
+| =o= | copy the current TOTP (if the entry has one) |
+| =v= | view the entry (hide/show password)          |
+| =e= | edit the entry                               |
+| =c= | clone the entry                              |
+| =a= | add a new entry in this group                |
+| =d= | delete the entry                             |
 
 The selection minibuffer additionally offers =insert username= (=[P]=)
 and =insert password= (=[U]=) at point, and the =keemacs-insert-password=
@@ -485,19 +485,19 @@ this package, so one line binds them all:
 
 The default bindings under the prefix (=C-:= here, any prefix you like):
 
-| key   | command                             |
-|-------+-------------------------------------|
-| =k=   | =keemacs= (the tree main screen) |
-| =t=   | =keemacs-titles=             |
-| =g=   | =keemacs-group=              |
-| =d=   | =keemacs-select-database=    |
-| =f=   | =keemacs-favorites=          |
-| =F=   | =keemacs-favorites-by-key=   |
-| =c=   | =keemacs-auth-forget-cached= |
-| =a=   | =keemacs-add=                |
-| =K=   | =keemacs-select-database-by-key= |
-| =A=   | =keemacs-add-group=          |
-| =D=   | =keemacs-delete-group=       |
+| key | command                          |
+|-----+----------------------------------|
+| =k= | =keemacs= (the tree main screen) |
+| =t= | =keemacs-titles=                 |
+| =g= | =keemacs-groups=                 |
+| =d= | =keemacs-select-database=        |
+| =f= | =keemacs-favorites=              |
+| =F= | =keemacs-favorites-by-key=       |
+| =c= | =keemacs-auth-forget-cached=     |
+| =a= | =keemacs-add=                    |
+| =K= | =keemacs-select-database-by-key= |
+| =A= | =keemacs-add-group=              |
+| =D= | =keemacs-delete-group=           |
 
 On Emacs versions without =keymap-global-set= (pre-29), the classic
 spelling is:
@@ -528,9 +528,9 @@ loaded.  Any prefix key works -- bind =F5= or =C-c k= the same way.
 Press =r= to reveal or re-hide the password; =u=, =p=, =l=, =n=, =o= copy
 the corresponding field; =e= edits; =q= quits.  The key menu at the
 bottom shows all the bindings.  An entry with an expiry date gets an
-=Expires= line under the notes, struck through once the date has
-passed (the date itself is set in the KeePass GUI -- =keepassxc-cli=
-offers no way to change it).
+=Expires= line between the URL and the notes (notes are always last),
+struck through once the date has passed (the date itself is set in the
+KeePass GUI -- =keepassxc-cli= offers no way to change it).
 
 **** Editing
 

@@ -844,7 +844,10 @@ struck through once it has passed."
     (should (get-text-property
              (string-match-p "2020-01-01" (buffer-string))
              'face (buffer-string)))
-    (should (string-match-p "2020-01-01" (buffer-string))))
+    (should (string-match-p "2020-01-01" (buffer-string)))
+    ;; The expiry sits between the URL and the notes; notes stay last.
+    (should (< (string-match-p "Expires" (buffer-string))
+               (string-match-p "^Notes" (buffer-string)))))
   ;; An entry without expiry shows no line.
   (with-temp-buffer
     (keemacs-view-mode)

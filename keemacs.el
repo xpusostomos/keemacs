@@ -50,7 +50,7 @@
 ;;   - `keemacs-titles'     pick an entry through the minibuffer
 ;;     (consult/vertico), then act on it (RET and `C-.' both lead to the
 ;;     action menu)
-;;   - `keemacs-group'      drill down group by group in the minibuffer
+;;   - `keemacs-groups'      drill down group by group in the minibuffer
 ;;   - `keemacs-buffer'     a columned listing buffer (Embark works
 ;;     on the entry at point)
 ;;
@@ -1173,11 +1173,11 @@ which case there is nothing to hide."
       (dolist (f '("Title" "UserName"))
         (insert (funcall label f) (keemacs--field entry f) "\n"))
       (insert (funcall label "Password") pw "\n")
-      (dolist (f '("URL" "Notes"))
-        (insert (funcall label f) (keemacs--field entry f) "\n"))
+      (insert (funcall label "URL") (keemacs--field entry "URL") "\n")
       ;; The expiry time (from the export; `show' does not print it),
       ;; struck through on the warning face once it has passed.  An
-      ;; unparseable ExpiryTime is simply not shown.
+      ;; unparseable ExpiryTime is simply not shown.  Notes stays the
+      ;; last field.
       (when-let* ((parsed (keemacs--expiry-parse keemacs-view-expiry)))
         (let* ((expiry (format-time-string "%Y-%m-%d %H:%M" parsed))
                (text (if (keemacs--entry-expired-p
@@ -1186,6 +1186,7 @@ which case there is nothing to hide."
                          (propertize expiry 'face 'keemacs-expired)
                        expiry)))
           (insert (funcall label "Expires") text "\n")))
+      (insert (funcall label "Notes") (keemacs--field entry "Notes") "\n")
       (insert (keemacs--view-menu)))
     (goto-char (point-min)))
   (setq buffer-read-only t))
@@ -2713,7 +2714,7 @@ entry returns its path.  Returns nil if a group turns out empty."
               (t path))))))
 
 ;;;###autoload
-(defun keemacs-group (&optional path)
+(defun keemacs-groups (&optional path)
   "Select a KeePass entry by navigating its group hierarchy.
 Start from GROUP (default \"/\", the root) and complete over each
 group's children one level at a time -- subgroups and entries -- until
@@ -3073,7 +3074,7 @@ taken -- the same rule the favorites menus use."
 ;; `k' is the keemacs main screen -- the tree view.
 (define-key keemacs-command-map (kbd "k") #'keemacs)
 (define-key keemacs-command-map (kbd "t") #'keemacs-titles)
-(define-key keemacs-command-map (kbd "g") #'keemacs-group)
+(define-key keemacs-command-map (kbd "g") #'keemacs-groups)
 (define-key keemacs-command-map (kbd "d") #'keemacs-select-database)
 (define-key keemacs-command-map (kbd "f") #'keemacs-favorites)
 (define-key keemacs-command-map (kbd "F") #'keemacs-favorites-by-key)
