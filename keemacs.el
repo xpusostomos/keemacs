@@ -51,8 +51,6 @@
 ;;     (consult/vertico), then act on it (RET and `C-.' both lead to the
 ;;     action menu)
 ;;   - `keemacs-groups'      drill down group by group in the minibuffer
-;;   - `keemacs-buffer'     a columned listing buffer (Embark works
-;;     on the entry at point)
 ;;
 ;; The same actions are available from the Embark action maps
 ;; (`keemacs-action-map' and `keemacs-select-action-map') and
@@ -131,14 +129,14 @@ For example:
   (setq keemacs-databases
         \\='((:name \"personal\" :file \"~/passwords.kdbx\")
             (:file \"~/work.kdbx\" :keyfile \"~/work.keyx\")))"
-  :type '(repeat keepass-db-spec)
+  :type '(repeat keemacs-auth-db-spec)
   :group 'keemacs)
 
 (defcustom keemacs-database nil
   "The currently active KeePass database spec (a `keemacs-auth-make-db-spec'
 plist).  Set interactively with `keemacs-select-database'."
   :type '(choice (const :tag "None" nil)
-                 keepass-db-spec)
+                 keemacs-auth-db-spec)
   :group 'keemacs)
 
 (defcustom keemacs-always-select-database nil
@@ -161,15 +159,6 @@ is nothing to choose, so it is picked automatically either way."
 (add-variable-watcher 'keemacs-databases
                       (lambda (_sym _newval _op _where)
                         (setq keemacs-database nil)))
-
-(defcustom keemacs-auth-cache-expiry 7200
-  "How many seconds to cache the database master password.  Nil disables."
-  :type '(choice (const :tag "Never" nil)
-                 (const :tag "All Day" 86400)
-                 (const :tag "2 Hours" 7200)
-                 (const :tag "30 Minutes" 1800)
-                 (integer :tag "Seconds"))
-  :group 'keemacs)
 
 (defcustom keemacs-fields '("Title" "UserName" "URL")
   "Fields shown in each candidate line, in order.
@@ -1762,7 +1751,7 @@ point."
   "Embark target for the entry under point or in the selection minibuffer.
 The target type depends on the context, so Embark shows the right menu:
 `keemacs-view' in the view buffer (whose menu omits the redundant
-view action), `keemacs' in the listing and tree buffers for entries,
+view action), `keemacs' in the tree buffers for entries,
 `keemacs-tree-group' for a tree group, `keemacs-tree-db' for a tree
 database, and `keemacs-select' in the selection minibuffer (whose
 menu adds the insert actions, which only make sense while the
@@ -1788,10 +1777,6 @@ originating buffer's point is preserved)."
           (setq type 'keemacs-tree-db
                 path (keemacs--spec-label
                       (oref (magit-current-section) value)))))))
-     ;; In the listing buffer: the entry at point.
-     ((derived-mode-p 'keemacs-mode)
-      (setq type 'keemacs
-            path (get-text-property (point) 'kb-path)))
      ;; In the view buffer: the entry being viewed.
      ((derived-mode-p 'keemacs-view-mode)
       (setq type 'keemacs-view
@@ -1845,7 +1830,7 @@ displays last."
 (defconst keemacs-action-map
   (keemacs--build-action-map)
   "Embark actions for a keemacs entry target.
-Used in the listing buffer, where point is not in an editing context and
+Used for tree rows, where point is not in an editing context and
 the insert actions do not apply.  Copy actions are listed in the canonical
 field order: Title, UserName, Password, URL, Notes.")
 
@@ -2094,54 +2079,6 @@ A command wrapper so RET in the action map can invoke whatever function
   (interactive "sEntry path: ")
   (funcall keemacs-default-action path))
 
-;;; Listing buffer
-
-(defvar keemacs-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "C-.") #'embark-act)
-    (define-key map (kbd "g") #'keemacs-refresh)
-    map)
-  "Keymap for `keemacs-mode'.")
-
-(define-derived-mode keemacs-mode special-mode "keemacs"
-  "Major mode for the keemacs listing buffer."
-  (setq buffer-read-only nil
-        truncate-lines t
-        revert-buffer-function #'keemacs--revert))
-
-(defun keemacs--revert (&rest _)
-  "Refresh the listing buffer from the database."
-  (keemacs--insert-list))
-
-(defun keemacs--insert-list ()
-  "Insert the current entries into the current buffer."
-  (let ((inhibit-read-only t))
-    (erase-buffer)
-    (dolist (candidate (keemacs--candidates))
-      (insert candidate "\n"))
-    (goto-char (point-min))))
-
-(defun keemacs-refresh ()
-  "Reload the entry list from the database and redisplay."
-  (interactive)
-  (let ((buf (current-buffer)))
-    (keemacs--load-entries)
-    (with-current-buffer buf
-      (keemacs--insert-list))))
-
-;;;###autoload
-(defun keemacs-buffer ()
-  "Open a columned listing buffer of all entries.
-Press `embark-act' (`C-.') on a row to reach the action menu."
-  (interactive)
-  (keemacs--require-db)
-  (let ((buf (get-buffer-create "*keemacs*")))
-    (switch-to-buffer buf)
-    (unless (eq major-mode 'keemacs-mode)
-      (keemacs-mode))
-    (keemacs--insert-list)))
-
 ;;;; Tree view
 ;;
 ;; The main screen: the whole active database as a magit-section tree of
@@ -2359,16 +2296,23 @@ value shows its first line only."
 last tree build.  Used to detect, cheaply, whether the tree is stale:
 a rebuild only re-exports when one of the files changed on disk.")
 
+(defun keemacs--db-mtime (spec)
+  "Return the modification time of database SPEC's file, or nil.
+nil also stands for a missing file."
+  (let* ((file (expand-file-name
+                (keemacs-auth-db-spec-file
+                 (keemacs-auth-db-spec-normalize spec))))
+         (attr (file-attributes file)))
+    (and attr (file-attribute-modification-time attr))))
+
 (defun keemacs-tree--current-mtimes ()
   "Return (FILE . MTIME) for every configured database.
 A missing file gets an MTIME of nil."
   (mapcar (lambda (spec)
-            (let* ((file (expand-file-name
-                          (keemacs-auth-db-spec-file
-                           (keemacs-auth-db-spec-normalize spec))))
-                   (attr (file-attributes file)))
-              (cons file (and attr
-                              (file-attribute-modification-time attr)))))
+            (cons (expand-file-name
+                   (keemacs-auth-db-spec-file
+                    (keemacs-auth-db-spec-normalize spec)))
+                  (keemacs--db-mtime spec)))
           keemacs-databases))
 
 (defun keemacs-tree--stale-p ()
@@ -2641,21 +2585,21 @@ databases."
       (keemacs-tree--insert))
     (switch-to-buffer buf)))
 
-(defun keemacs-tree--refresh-on-show (&optional frame)
+(defun keemacs--refresh-on-show (&optional frame)
   "Rebuild the tree when it becomes visible, if a database changed.
 This keeps the tree honest after changes made anywhere -- by keemacs
 itself or by another program writing the kdbx -- without paying for a
 re-export on every visit: the rebuild only happens when a configured
 database file's modification time changed on disk, or the database
-list itself did."
+selection did."
   (dolist (window (window-list frame))
     (with-current-buffer (window-buffer window)
       (when (and (derived-mode-p 'keemacs-tree-mode)
                  (keemacs-tree--stale-p))
         (keemacs-tree-refresh)))))
 
-(add-hook 'window-buffer-change-functions #'keemacs-tree--refresh-on-show)
-(add-hook 'window-selection-change-functions #'keemacs-tree--refresh-on-show)
+(add-hook 'window-buffer-change-functions #'keemacs--refresh-on-show)
+(add-hook 'window-selection-change-functions #'keemacs--refresh-on-show)
 
 ;;;###autoload
 (defun keemacs-titles ()

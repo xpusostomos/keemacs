@@ -492,7 +492,7 @@ known\").  The pure string helpers must never touch those."
     (should (null queue))))
 
 (ert-deftest keemacs-group-command-picks-entry ()
-  "`keemacs-group' drills down and runs the default action on the entry."
+  "`keemacs-groups' drills down and runs the default action on the entry."
   (let* ((entries '(("/A/b" . nil)))
          (queue (list (keemacs--format-group "/A/")
                       (keemacs--format-candidate "/A/b" nil)))
@@ -503,7 +503,7 @@ known\").  The pure string helpers must never touch those."
                (lambda () entries))
               ((symbol-function 'consult--read)
                (lambda (&rest _) (pop queue))))
-      (should (equal "/A/b" (keemacs-group))))
+      (should (equal "/A/b" (keemacs-groups))))
     (should (equal "/A/b" (car box)))))
 
 (ert-deftest keemacs-format-group-tags-path ()
@@ -603,7 +603,7 @@ on commit) and invent a phantom group."
   "The command keymap binds every command under C-:."
   (dolist (bind '(("k" keemacs)
                   ("t" keemacs-titles)
-                  ("g" keemacs-group)
+                  ("g" keemacs-groups)
                   ("d" keemacs-select-database)
                   ("f" keemacs-favorites)
                   ("F" keemacs-favorites-by-key)
@@ -809,6 +809,7 @@ entries."
                      ("UserName" . "bob") ("URL" . "https://y")))))
     (should (= (string-width (substring exp 0 (string-match-p "alice" exp)))
                (string-width (substring liv 0 (string-match-p "bob" liv)))))))
+
 
 (ert-deftest keemacs-tree-buffer-keeps-expired-face ()
   "The built tree buffer keeps the expired title's face: it is set as

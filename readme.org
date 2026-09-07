@@ -14,13 +14,16 @@ password databases ( =.kdbx= files):
   asks for them.  It does nothing interactive -- no browsing, no editing.
 
 - =keemacs= -- an all-singing, all-dancing KeePass browser and
-  editor for Emacs.  List entries, search by typing, drill down through
-  the folder hierarchy group by group, view an entry with its password
-  hidden, copy any field (password, username, URL, notes, TOTP) to the
-  clipboard, and add, clone, edit or delete entries directly in the
-  database.  It is driven by =consult= and =embark= and is built on top
-  of =keemacs-auth=, sharing its command-line backend,
-  master-password prompting/caching and error handling.
+  editor for Emacs.  Browse everything in a magit-style tree with one
+  section per database, list entries, search by typing, drill down
+  through the folder hierarchy group by group, view an entry with its
+  password hidden, copy any field (password, username, URL, notes,
+  TOTP) to the clipboard, and add, clone, edit, move or delete entries
+  directly in the database.  The tree refreshes itself whenever the
+  database file changes.  Selection is driven
+  by =consult=, actions by =embark=, the tree by =magit-section=, and
+  it is built on top of =keemacs-auth=, sharing its command-line
+  backend, master-password prompting/caching and error handling.
 
 To choose a package, ask yourself what you want:
 
@@ -70,11 +73,11 @@ Add =keemacs-auth= to your =load-path=.
 #+BEGIN_SRC elisp
   (require 'keemacs-auth)
   (keemacs-auth-enable)
-  (add-to-list 'auth-sources (keepass-make-db-spec :file "~/.emacs.d/passwords.kdbx"))
+  (add-to-list 'auth-sources (keemacs-auth-make-db-spec :file "~/.emacs.d/passwords.kdbx"))
 #+END_SRC
 
 Each =auth-sources= entry is a *database spec*: a keyword plist built
-with =keepass-make-db-spec=.  The simplest spec is just a file; add
+with =keemacs-auth-make-db-spec=.  The simplest spec is just a file; add
 keywords for a key file, a fixed password, a YubiKey or a passwordless
 database.  See [[The database spec]] below.
 
@@ -82,14 +85,14 @@ database.  See [[The database spec]] below.
 
 Every database used by this package -- in =auth-sources= or in
 =keemacs-databases= -- is a keyword spec built with
-=keepass-make-db-spec=.
+=keemacs-auth-make-db-spec=.
 
-=keepass-make-db-spec= takes keywords and returns a plain plist that the
+=keemacs-auth-make-db-spec= takes keywords and returns a plain plist that the
 package reads through accessors like a struct, so the keywords can be
 given in any order:
 
 #+BEGIN_SRC elisp
-  (keepass-make-db-spec :file   "~/passwords.kdbx")
+  (keemacs-auth-make-db-spec :file   "~/passwords.kdbx")
   ;;                          :keyfile "~/passwords.keyx"
   ;;                          :password "swordfish"   ; or :prompt (default), nil, or a function
   ;;                          :yubi     "1:7370001"
@@ -115,7 +118,7 @@ For example, a database secured by both a key file and a YubiKey, whose
 password you want to be asked for, looks like:
 
 #+BEGIN_SRC elisp
-  (keepass-make-db-spec :file "~/work.kdbx"
+  (keemacs-auth-make-db-spec :file "~/work.kdbx"
                         :keyfile "~/work.keyx"
                         :yubi "1:7370001")
 #+END_SRC
@@ -124,7 +127,7 @@ and a passwordless database is spelled out with an explicit =nil= (note
 that omitting =:password= means *ask the user*, not *no password*):
 
 #+BEGIN_SRC elisp
-  (keepass-make-db-spec :file "~/public.kdbx" :password nil)
+  (keemacs-auth-make-db-spec :file "~/public.kdbx" :password nil)
 #+END_SRC
 
 Give the spec straight to =auth-source=, either by hand or by listing the
@@ -132,11 +135,11 @@ database in =keemacs-databases= (see below):
 
 #+BEGIN_SRC elisp
   (add-to-list 'auth-sources
-               (keepass-make-db-spec :file "~/passwords.kdbx"))
+               (keemacs-auth-make-db-spec :file "~/passwords.kdbx"))
 #+END_SRC
 
 =keemacs-databases= has a dedicated =M-x customize= interface
-(with a =keepass-db-spec= widget) covering both forms.  For =auth-sources=
+(with a =keemacs-auth-db-spec= widget) covering both forms.  For =auth-sources=
 the plain file-name form is the easy one to customize; keyword specs are
 generally set with =setq=, as above.
 
@@ -205,7 +208,7 @@ A complete, working outgoing-mail setup:
 #+BEGIN_SRC elisp
   (require 'keemacs-auth)
   (keemacs-auth-enable)
-  (add-to-list 'auth-sources (keepass-make-db-spec :file "~/.emacs.d/passwords.kdbx"))
+  (add-to-list 'auth-sources (keemacs-auth-make-db-spec :file "~/.emacs.d/passwords.kdbx"))
 
   (setq send-mail-function        'smtpmail-send-it
         message-send-mail-function 'smtpmail-send-it
@@ -362,7 +365,7 @@ defaults to the file name.  A config is just a quoted list of plists:
 
 Since every entry is a plist, a plain quoted list works for most setups.
 If a value is a function (e.g. a =:password= that fetches from a secret
-store), build the list with =list= and =keepass-make-db-spec= instead, so
+store), build the list with =list= and =keemacs-auth-make-db-spec= instead, so
 the call is evaluated.
 
 With several databases configured, the first command you run asks which
@@ -432,10 +435,6 @@ action in every entry menu and the view screen.
   minibuffer (consult/vertico completion; typing narrows).  RET runs the
   default action (=keemacs-default-action=, by default *view*);
   <kbd>C-.</kbd> opens the full action menu.
-
-- <kbd>M-x</kbd> =keemacs-buffer= -- a columned listing buffer of
-  every entry; move to a row and press <kbd>C-.</kbd> (=embark-act=) for
-  the action menu.
 
 - <kbd>M-x</kbd> =keemacs-groups= -- the same completion but
   *group by group*: it starts at the database root (=/=) and completes
