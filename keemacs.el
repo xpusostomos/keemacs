@@ -1258,7 +1258,7 @@ rename).  Does nothing if no view buffer is open."
 (defconst keemacs-entry-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'keemacs--entry-commit)
-    (define-key map (kbd "C-c C-k") #'kill-buffer-and-window)
+    (define-key map (kbd "C-c C-k") #'keemacs--entry-abort)
     (define-key map (kbd "C-c C-r") #'keemacs--entry-regenerate)
     ;; Not C-c C-g: a C-g after a prefix key is specially handled by Emacs
     ;; as "cancel the prefix" and can never be dispatched to a binding.
@@ -1266,6 +1266,16 @@ rename).  Does nothing if no view buffer is open."
     (define-key map (kbd "TAB") #'keemacs--entry-next-field)
     map)
   "Keymap for `keemacs-entry-mode'.")
+
+(defun keemacs--entry-abort ()
+  "Kill the entry buffer without saving, leaving the windows alone.
+The stock `kill-buffer-and-window' used here deleted the window the
+entry buffer occupied -- which was usually the browse view's window --
+collapsing the frame layout as a side effect of cancelling.  Killing
+only the buffer brings the buffer behind it (the tree, a favorites
+menu, whatever opened this) straight back, exactly as committing does."
+  (interactive)
+  (kill-buffer (current-buffer)))
 
 (define-minor-mode keemacs-entry-mode
   "Minor mode for editing a KeePass entry as a text buffer.

@@ -242,6 +242,10 @@ the prefix\" and can never be dispatched to a binding."
               (lookup-key keemacs-entry-mode-map (kbd "C-c C-p"))))
   (should (eq #'keemacs--entry-commit
               (lookup-key keemacs-entry-mode-map (kbd "C-c C-c"))))
+  ;; Cancel kills only the buffer: `kill-buffer-and-window' here used
+  ;; to delete the browse view's window with it.
+  (should (eq #'keemacs--entry-abort
+              (lookup-key keemacs-entry-mode-map (kbd "C-c C-k"))))
   ;; Guard against reintroducing the C-g trap.
   (should-not (lookup-key keemacs-entry-mode-map (kbd "C-c C-g"))))
 
