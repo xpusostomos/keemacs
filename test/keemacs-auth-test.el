@@ -307,7 +307,9 @@ A search must return all entries that match *every* key given, and only them."
       (delete-file db))))
 
 (ert-deftest keemacs-auth-integration-wrong-password-signals ()
-  "A wrong master password is reported, not silently empty."
+  "A wrong master password is reported and the database skipped --
+nil returned, the bad cached password evicted -- so an auth-source
+walk over several databases continues to the next one."
   (skip-unless keemacs-auth-test-program)
   (let* ((db (keemacs-auth-test-make-db))
          (backend (auth-source-backend
@@ -319,9 +321,10 @@ A search must return all entries that match *every* key given, and only them."
         (keemacs-auth--with-cli 'keepassxc
           (let ((password-cache-expiry nil))
             (password-cache-add db "WRONG"))
-          (should-error (keemacs-auth-source-search
-                         :backend backend :host "x.example.com" :user "alice" :port 443 :max 1)
-                        :type 'user-error))
+          (should-not (keemacs-auth-source-search
+                       :backend backend :host "x.example.com" :user "alice" :port 443 :max 1))
+          ;; The bad password was evicted.
+          (should-not (password-in-cache-p db)))
       (delete-file db))))
 
 ;;;; Search-term builder: aliases map onto the 5 canonical fields
@@ -560,6 +563,100 @@ advice's flist, not a list, and the old idempotence check fed it to
     (advice-remove 'auth-source-remember
                    #'keemacs-auth--remember-advice)))
 
+(ert-deftest keemacs-auth-parser-declines-non-keepass ()
+  "The backend parser declines non-keepass `auth-sources' entries
+silently.  Stock entries such as the \"~/.authinfo\" string are normal
+in `auth-sources'; once this parser was registered it used to signal
+`Invalid keepass database spec' on them, which broke every
+auth-source search -- including mu4e/smtpmail password lookups."
+  (let ((keemacs-auth--active-cli 'keepassxc)
+        (keemacs-auth-cache-expiry nil))
+    ;; The stock string entry, and assorted non-keepass shapes: all nil.
+    (should-not (keemacs-auth-source-backend-parser "~/.authinfo"))
+    (should-not (keemacs-auth-source-backend-parser '(:host "smtp.gmail.com")))
+    (should-not (keemacs-auth-source-backend-parser '(mac . apple)))
+    (should-not (keemacs-auth-source-backend-parser nil))
+    ;; A non-kdbx keepass spec is still declined, without error.
+    (should-not (keemacs-auth-source-backend-parser
+                 (keemacs-auth-make-db-spec :file "/x.txt")))
+    ;; A kdbx spec yields the backend, as always.
+    (should (auth-source-backend-p
+             (keemacs-auth-source-backend-parser
+              (keemacs-auth-make-db-spec :file "/x.kdbx"))))))
+
+(ert-deftest keemacs-auth-open-failure-errors ()
+  "A missing database file is skipped silently; a present-but-locked
+database is skipped with a message (so the next configured database
+still gets asked) and the bad cached password is evicted."
+  (let* ((spec (keemacs-auth-make-db-spec :file "/nope.kdbx" :password "pw"))
+         (backend (auth-source-backend
+                   :type 'keepass :source "/nope.kdbx"
+                   :search-function #'keemacs-auth-source-search
+                   :data spec))
+         (missing-count 0))
+    ;; File missing: skipped silently, no password prompt.
+    (cl-letf (((symbol-function 'file-exists-p)
+               (lambda (_) (setq missing-count (1+ missing-count)) nil)))
+      (should-not (keemacs-auth-source-search
+                   :backend backend :host "smtp.gmail.com")))
+    (should (= 1 missing-count))
+    ;; File present but locked: skipped, cache evicted.
+    (password-cache-add "/nope.kdbx" "stale")
+    (cl-letf (((symbol-function 'keemacs-auth--list-entries)
+               (lambda (_entity _spec _password) '(nil :locked)))
+              ((symbol-function 'file-exists-p) (lambda (_) t)))
+      (should-not (keemacs-auth-source-search
+                   :backend backend :host "smtp.gmail.com")))
+    (should-not (password-in-cache-p "/nope.kdbx"))
+    (password-cache-remove "/nope.kdbx")))
+
+(ert-deftest keemacs-auth-empty-password-skips ()
+  "An empty entry at the master-password prompt means the user chose
+not to unlock: the database is skipped, returning nil -- never the
+message string, which auth-source would mistake for a search result."
+  (let* ((spec (keemacs-auth-make-db-spec :file "/nope.kdbx"))
+         (backend (auth-source-backend
+                   :type 'keepass :source "/nope.kdbx"
+                   :search-function #'keemacs-auth-source-search
+                   :data spec)))
+    (cl-letf (((symbol-function 'file-exists-p) (lambda (_) t))
+              ((symbol-function 'keemacs-auth--resolve-password)
+               (lambda (_password-spec _entity _expiry) ""))
+              ((symbol-function 'keemacs-auth--list-entries)
+               (lambda (&rest _) (error "must not be reached"))))
+      (should-not (keemacs-auth-source-search
+                   :backend backend :host "smtp.gmail.com")))))
+
+(ert-deftest keemacs-auth-remember-rejects-non-list ()
+  "A non-list search result is never remembered, and the remember
+cache is purged when one is seen.  A bug once returned a message
+string as a result; auth-source remembered it and served it for every
+subsequent search, breaking callers with
+`let*: Wrong type argument: listp'."
+  (let ((keemacs-auth-suppress-negative-cache t))
+    (unwind-protect
+        (progn
+          (auth-source-forget-all-cached)
+          (let ((remembered nil))
+            (cl-letf (((symbol-function 'auth-source-remember)
+                       (lambda (_spec found)
+                         (setq remembered (cons found remembered)))))
+              ;; Empty result: suppressed.
+              (keemacs-auth--remember-advice
+               #'auth-source-remember '(:host "x") nil)
+              ;; A string result: rejected and never remembered.
+              (keemacs-auth--remember-advice
+               #'auth-source-remember '(:host "x")
+               "keemacs: /x.kdbx skipped (no password entered)")
+              ;; A well-formed list result passes through.
+              (keemacs-auth--remember-advice
+               #'auth-source-remember '(:host "x")
+               (list (list :host "smtp.gmail.com" :secret (lambda () "s")))))
+            ;; Only the well-formed list was remembered.
+            (should (= 1 (length remembered)))
+            (should (listp (car remembered)))))
+      (auth-source-forget-all-cached))))
+
 (ert-deftest keemacs-auth-multi-db-separate-caches ()
   "Multiple databases each answer their own queries, each master
 password is cached separately, and entries with portless URLs are found
@@ -658,17 +755,17 @@ from a string or from a function in the spec."
               (let ((res (auth-source-search :host "kf.example" :user "me@kf"
                                              :port "465" :require '(:secret))))
                 (should (= 1 (length res))))))
-          ;; A wrong key file means keepassxc-cli cannot open the DB: the failed
-          ;; open is treated as a wrong credential, so the lookup raises
-          ;; `user-error'.  (A distinct host avoids the auth-source success
+          ;; A wrong key file means keepassxc-cli cannot open the DB: the
+          ;; failed open is reported as a wrong credential and the lookup
+          ;; skips the database (nil), so a walk over several databases
+          ;; continues.  (A distinct host avoids the auth-source success
           ;; cache from the earlier searches masking the failure.)
           (let ((auth-sources (list (keemacs-auth-make-db-spec
                                      :file db :keyfile "/nonexistent-key.txt"
                                      :password "KEYPW"))))
             (let ((password-cache-expiry nil))
-              (should-error (auth-source-search :host "other.example" :user "me@kf"
-                                                :port "465" :require '(:secret))
-                            :type 'user-error))))
+              (should-not (auth-source-search :host "other.example" :user "me@kf"
+                                              :port "465" :require '(:secret))))))
       (ignore-errors (delete-file db))
       (ignore-errors (delete-file keyfile))
       (ignore-errors (delete-directory dir)))))

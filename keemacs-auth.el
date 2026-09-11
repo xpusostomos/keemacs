@@ -291,7 +291,10 @@ canonical key order so `equal' comparisons are order-independent."
 A spec is a plist whose own keywords all belong to
 `keemacs-auth-db-spec-keys' and which spells out a `:file'.  Values may be any
 Lisp object."
+  ;; A dotted cons such as `(mac . apple)' is a cons but not a plist;
+  ;; `plist-member' would signal on it.
   (and (consp spec)
+       (proper-list-p spec)
        (plist-member spec :file)
        (let ((tail spec) (ok t))
          ;; Walk only the key (odd) positions.
@@ -408,7 +411,10 @@ Returns the password."
          (password (cond
                     ((password-read-from-cache db))
                     ((password-read prompt db)))))
-    (password-cache-add db password)
+    ;; An empty entry means the user declined to unlock: don't cache
+    ;; that, or the database could never be unlocked this session.
+    (unless (string-empty-p password)
+      (password-cache-add db password))
     password))
 
 (defun keemacs-auth--keyfile-args (keyfile)
@@ -719,7 +725,10 @@ nil for backends that do not emit one."
                                       &key backend host user port max title
                                         &allow-other-keys)
   "Find the password for a request.
-If several passwords are available, prompt the user to select an entry."
+If several passwords are available, prompt the user to select an entry.
+A database that fails to unlock -- wrong password, or a cancelled
+prompt -- is skipped with a message, so the next configured database
+still gets asked; `auth-source' walks one backend per database."
   ;; The backend's `source' slot is the database path (its type is string);
   ;; the full spec (key file, password, YubiKey) lives in the `data' slot
   ;; when the entry was a spec, and defaults apply otherwise.  The search
@@ -730,101 +739,139 @@ If several passwords are available, prompt the user to select an entry."
                     ;; A plain-string :source (no spec) -> a spec with just
                     ;; the file, i.e. prompt-for-password.
                     (keemacs-auth-make-db-spec :file (slot-value backend 'source))))
-         (entity (keemacs-auth-db-spec-file db-spec))
+         ;; keepass-cli cannot open a leading-~ path (call-process does
+         ;; no shell expansion), so the database argument is always
+         ;; absolute.  The expanded path is also the cache key that
+         ;; `M-x keemacs' uses, so one unlock serves both the tree and
+         ;; auth-source searches.
+         (entity (expand-file-name (keemacs-auth-db-spec-file db-spec)))
          (keyfile (keemacs-auth-db-spec-keyfile db-spec))
          (password-spec (keemacs-auth-db-spec-password db-spec))
          (yubi (keemacs-auth-db-spec-yubi db-spec)))
     (when (file-exists-p entity)
-      (when keemacs-auth-verbose
-        (message "keemacs-auth-source-search spec: host=%S user=%S port=%S title=%S"
-                 host user port title))
-      (let* ((url (url-generic-parse-url host))
-             (url (if (url-fullness url)
-                      url
-                    (url-generic-parse-url (concat "//" host))))
-             (host (or (url-host url) ""))
-             (max (or max 1))
-             (path (or (car (url-path-and-query url)) ""))
-             (password (keemacs-auth--resolve-password
-                        password-spec entity keemacs-auth-cache-expiry))
-             (spec `(:host ,host :user ,user :port ,port :title ,title
-                        :path ,path :db ,entity
-                        :keyfile ,keyfile :yubi ,yubi))
-             (parsed (keemacs-auth--list-entries entity spec password))
-             (result (nth 0 parsed))
-             (status (nth 1 parsed)))
-        (cond
-         ;; Wrong master password (backend-specific marker).
-         ((and (eq keemacs-auth--active-cli 'keepassxc)
-               (keemacs-auth--keepassxc-locked-p status))
-          (password-cache-remove entity)
-          (user-error "Incorrect password for %s" entity))
-         ((and (eq keemacs-auth--active-cli 'kpscript)
-               (with-temp-buffer
-                 (insert status)
-                 (goto-char 0)
-                 (search-forward-regexp "^Unhandled Exception:" nil t)))
-          (password-cache-remove entity)
-          (user-error
-           "An exception was thrown by KeePass.exe (your KPScript is likely out of date)\n %s"
-           status))
-         ((and (eq keemacs-auth--active-cli 'kpscript)
-               (with-temp-buffer
-                 (insert status)
-                 (goto-char 0)
-                 (search-forward-regexp "^E:" nil t)))
-          (cond
-           ((string-match-p "The master key is invalid" status)
-            (password-cache-remove entity)
-            (user-error "Incorrect password for %s" entity))
-           (t (user-error "Something went wrong in keepass: %s" status))))
-         (t (let* ((rc (when (and keemacs-auth-match-title
-                                 title
-                                 (not (string-blank-p title)))
-                           (seq-filter
-                            (lambda (it)
-                              (keemacs-auth-s-contains-p
-                               title (plist-get it :title) t))
-                            result)))
-                   (used (if (= 1 (length rc)) rc result)))
+      ;; A failed unlock (wrong password, cancelled prompt) skips this
+      ;; database instead of aborting the search -- the caller may have
+      ;; several configured, and the next one may well unlock.
+      (condition-case err
+          (let* ((password (keemacs-auth--resolve-password
+                            password-spec entity keemacs-auth-cache-expiry))
+                 (url (url-generic-parse-url host))
+                 (url (if (url-fullness url)
+                          url
+                        (url-generic-parse-url (concat "//" host))))
+                 (host (or (url-host url) ""))
+                 (max (or max 1))
+                 (path (or (car (url-path-and-query url)) ""))
+                 (spec `(:host ,host :user ,user :port ,port :title ,title
+                            :path ,path :db ,entity
+                            :keyfile ,keyfile :yubi ,yubi))
+                 ;; An empty password means the user declined to
+                 ;; unlock: nothing is listed for this database.
+                 (parsed (if (and (stringp password) (string-empty-p password))
+                             nil
+                           (keemacs-auth--list-entries entity spec password)))
+                 (result (nth 0 parsed))
+                 (status (nth 1 parsed)))
+            (cond
+             ;; The user hit enter on an empty prompt: they chose not
+             ;; to unlock this database -- skip it without an error.
+             ;; (Return nil explicitly: `message' returns the string,
+             ;; which auth-source would take for a search result.)
+             ((and (stringp password) (string-empty-p password))
+              (message "keemacs: %s skipped (no password entered)" entity)
+              nil)
+             ;; Wrong master password (backend-specific marker).
+             ((and (eq keemacs-auth--active-cli 'keepassxc)
+                   (keemacs-auth--keepassxc-locked-p status))
+              (password-cache-remove entity)
+              (user-error "Incorrect password for %s" entity))
+             ((and (eq keemacs-auth--active-cli 'kpscript)
+                   (with-temp-buffer
+                     (insert status)
+                     (goto-char 0)
+                     (search-forward-regexp "^Unhandled Exception:" nil t)))
+              (password-cache-remove entity)
+              (user-error
+               "An exception was thrown by KeePass.exe (your KPScript is likely out of date)\n %s"
+               status))
+             ((and (eq keemacs-auth--active-cli 'kpscript)
+                   (with-temp-buffer
+                     (insert status)
+                     (goto-char 0)
+                     (search-forward-regexp "^E:" nil t)))
               (cond
-               ((= 0 (length used)) nil)
-               (t
-                (when (and keemacs-auth-verbose
-                           (> (length used) 1))
-                  (message (concat "keemacs: %d matching entries "
-                                   "for %S; returning up to %d")
-                           (length used) host max))
-                (seq-take used max))))))))))
+               ((string-match-p "The master key is invalid" status)
+                (password-cache-remove entity)
+                (user-error "Incorrect password for %s" entity))
+               (t (user-error "Something went wrong in keepass: %s" status))))
+             (t (let* ((rc (when (and keemacs-auth-match-title
+                                      title
+                                      (not (string-blank-p title)))
+                                (seq-filter
+                                 (lambda (it)
+                                   (keemacs-auth-s-contains-p
+                                    title (plist-get it :title) t))
+                                 result)))
+                        (used (if (= 1 (length rc)) rc result)))
+                   (cond
+                    ((= 0 (length used)) nil)
+                    (t
+                     (when (and keemacs-auth-verbose
+                                (> (length used) 1))
+                       (message (concat "keemacs: %d matching entries "
+                                        "for %S; returning up to %d")
+                                (length used) host max))
+                     (seq-take used max)))))))
+        (user-error
+         (message "keemacs: %s -- trying the next database"
+                  (error-message-string err))
+         nil)))))
 
 (defun keemacs-auth-source-backend-parser (entry)
-  "Provides keepass backend for files with the .kdbx extension.
-ENTRY is a database spec plist (see `keemacs-auth-db-spec-normalize'), e.g. a
-keyword spec from `keemacs-auth-make-db-spec'.  The key file, password and
-YubiKey specifications are carried on the backend's `data' slot so the
-search can honour them."
-  (let* ((db (keemacs-auth-db-spec-normalize entry))
-         (path (keemacs-auth-db-spec-file db)))
-    (when (and (stringp path)
-               (string-equal "kdbx" (file-name-extension path)))
-      (auth-source-backend :type 'keepass
-                           :source path
-                           :search-function #'keemacs-auth-source-search
-                           ;; Stash the whole spec (key file, password,
-                           ;; YubiKey, name) for the search function, which
-                           ;; reads it back from `data'.  The `source' slot
-                           ;; stays the bare path string because that is its
-                           ;; declared type.
-                           :data db))))
+  "Provide a keepass backend for ENTRY when it is a kdbx database spec.
+ENTRY is one `auth-sources' element; anything that is not a database
+spec plist -- stock entries such as the \"~/.authinfo\" string are
+perfectly normal there -- yields nil, which tells auth-source to try
+the next parser.  (Signalling on those entries used to break *every*
+auth-source search once this parser was registered.)  The key file,
+password and YubiKey specifications are carried on the backend's
+`data' slot so the search can honour them."
+  (when (and (listp entry)         ; a dotted pair is no plist either
+             (keemacs-auth-db-spec-p entry))
+    (let* ((db (keemacs-auth-db-spec-normalize entry))
+           (path (keemacs-auth-db-spec-file db)))
+      (when (and (stringp path)
+                 (string-equal "kdbx" (file-name-extension path)))
+        (auth-source-backend :type 'keepass
+                             :source path
+                             :search-function #'keemacs-auth-source-search
+                             ;; Stash the whole spec (key file, password,
+                             ;; YubiKey, name) for the search function, which
+                             ;; reads it back from `data'.  The `source' slot
+                             ;; stays the bare path string because that is its
+                             ;; declared type.
+                             :data db)))))
 
 (defun keemacs-auth--remember-advice (fn spec found)
-  "Call auth-source-remember FN unless FOUND is empty.
-Suppresses negative caching: a lookup that finds nothing is not remembered,
-so a transient failure does not mask later queries.  See
-`keemacs-auth-suppress-negative-cache'."
-  (if (and keemacs-auth-suppress-negative-cache (null found))
-      nil
-    (funcall fn spec found)))
+  "Call auth-source-remember FN only for well-formed FOUND.
+Suppresses negative caching: a lookup that finds nothing is not
+remembered, so a transient failure does not mask later queries.  See
+`keemacs-auth-suppress-negative-cache'.
+
+A non-list FOUND is never remembered, and the remember cache is
+purged when one is seen: an early bug returned a message STRING as a
+search result, which auth-source then remembered and served for every
+subsequent search -- a truthy string that broke callers with
+`let*: Wrong type argument: listp' until the cache was flushed."
+  (cond
+   ((and keemacs-auth-suppress-negative-cache (null found))
+    nil)
+   ((and found (not (listp found)))
+    ;; Poison guard: purge the remember cache so the garbage is not
+    ;; served again, and do not re-remember it.
+    (auth-source-forget-all-cached)
+    nil)
+   (t (funcall fn spec found))))
 
 ;;;###autoload
 (defun keemacs-auth-enable ()
